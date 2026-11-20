@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::core::config::Config;
 use crate::core::confirmation_bus::types::{
-    Message, MessageBusType, ToolConfirmationRequest, ToolConfirmationResponse, ToolFinished,
-    ToolPolicyRejection, ToolStarted,
+    Message, MessageBusType, ToolApprovalRecorded, ToolConfirmationRequest,
+    ToolConfirmationResponse, ToolFinished, ToolPolicyRejection, ToolStarted,
 };
 use crate::core::confirmation_bus::MessageBus;
 use crate::core::permissions::{PermissionHit, SessionPermissionManager};
@@ -290,6 +290,20 @@ fn message_confirmation_details(
 /// 与 `policy_confirmation_details` 的区别只在文案：这里**没有** ask 规则命中，
 /// 说"matches an `ask` rule in your permission settings"是凭空捏造的 —— 用户会去
 /// settings 里找一条根本不存在的规则。兜底弹框是保守行为，不是用户配置的结果。
+fn auto_confirmation_details(
+    tool_name: &str,
+    args: &serde_json::Value,
+    reason: &str,
+) -> crate::core::tools::tools::ToolCallConfirmationDetails {
+    let mut details = default_confirmation_details(tool_name, args);
+    details.prompt = format!(
+        "{}{}",
+        crate::core::i18n::t1("ui.confirm.auto_reason").replace("{reason}", reason),
+        confirmation_summary(tool_name, args)
+    );
+    details
+}
+
 fn default_confirmation_details(
     tool_name: &str,
     args: &serde_json::Value,
@@ -703,10 +717,14 @@ impl ToolExecutor {
         };
 
         let mut requires_prompt = false;
+        let mut policy_requires_confirmation = false;
         let mut approved = false;
 
+        let permission_hit = self
+            .permission_manager
+            .check_allowed_with_identity(tool_name, args, None);
         let check = bus
-            .check_tool_policy_for(
+            .check_tool_policy_with_permission_for(
                 &FunctionCall {
                     name: tool_name.to_string(),
                     args: Some(args.clone()),
@@ -714,9 +732,11 @@ impl ToolExecutor {
                 },
                 None,
                 self.config.agent_identity.as_deref(),
+                permission_hit,
             )
             .await;
 
+        let auto_ask_reason = check.ask_reason;
         match check.decision {
             PolicyDecision::Deny | PolicyDecision::DenyWithReason(_) => {
                 let reason = match check.decision {
@@ -739,23 +759,17 @@ impl ToolExecutor {
                 return Gate::Closed(format!("Tool execution denied: {}", reason));
             }
             PolicyDecision::Allow => approved = true,
-            PolicyDecision::AskUser => requires_prompt = true,
+            PolicyDecision::AskUser => {
+                requires_prompt = true;
+                policy_requires_confirmation = check.explicit_rule;
+            }
         }
 
-        // 敏感文件门闸对 MCP 工具不适用（args 里没有本地路径），跳过。
-        //
-        // 会话/持久授权读回：registryless 工具没有 identity，按工具名记。
-        if !requires_prompt {
-            let permission_hit = self
-                .permission_manager
-                .check_allowed_with_identity(tool_name, args, None);
-            if permission_hit != PermissionHit::None {
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "✅ Permission: Allowing {} without prompt (registryless gate)",
-                    tool_name
-                ));
-                approved = true;
-            }
+        // 授权已交由统一策略入口消费，不能再用兜底 AskUser 阻止读回。
+        if approved && permission_hit != PermissionHit::None {
+            crate::utils::logging::append_debug_log_line(&format!(
+                "Permission: Allowing {tool_name} without prompt (registryless grant)"
+            ));
         }
 
         if approved {
@@ -766,15 +780,25 @@ impl ToolExecutor {
             return Gate::Open;
         }
 
-        // 用户确认卡片：默认兜底文案（没有规则可指）。
+        let card_source = if policy_requires_confirmation {
+            "ask_rule"
+        } else {
+            "fallback_default"
+        };
         let details = message_confirmation_details(
             tool_name,
             args,
-            default_confirmation_details(tool_name, args),
+            if policy_requires_confirmation {
+                policy_confirmation_details(tool_name, args)
+            } else if let Some(reason) = auto_ask_reason.as_deref() {
+                auto_confirmation_details(tool_name, args, reason)
+            } else {
+                default_confirmation_details(tool_name, args)
+            },
         );
         crate::utils::logging::append_debug_log_line(&format!(
-            "🔔 Asking for approval: {} (source=fallback_default, registryless)",
-            tool_name
+            "🔔 Asking for approval: {} (source={}, registryless)",
+            tool_name, card_source
         ));
 
         crate::agent::hooks::run_permission_request_hook(
@@ -786,7 +810,7 @@ impl ToolExecutor {
                     arguments: args.to_string(),
                 },
             },
-            "fallback_default",
+            card_source,
         )
         .await;
 
@@ -802,9 +826,11 @@ impl ToolExecutor {
             server_name: None,
             title: Some(details.title),
             prompt: Some(details.prompt),
-            reason: Some(
-                "No allow rule covers this tool — asking per the conservative fallback".to_string(),
-            ),
+            reason: auto_ask_reason
+                .map(|reason| {
+                    crate::core::i18n::t1("ui.confirm.auto_reason").replace("{reason}", &reason)
+                })
+                .or_else(|| build_prompt_reason(card_source, requires_prompt, None)),
             originating_tool_call_id: Some(originating_tool_call_id.to_string()),
         };
 
@@ -833,20 +859,31 @@ impl ToolExecutor {
             .clone()
             .unwrap_or(crate::types::ToolConfirmationOutcome::ProceedOnce);
         on_confirm(requested_outcome.clone(), response.feedback.clone());
-        match requested_outcome {
+        let persist_result = match requested_outcome {
             crate::types::ToolConfirmationOutcome::AllowSession => {
                 self.permission_manager
                     .allow_tool_session_with_identity(tool_name, None);
+                None
             }
             crate::types::ToolConfirmationOutcome::ProceedAlways => {
                 self.permission_manager
                     .allow_action_with_identity(tool_name, args, None);
+                None
             }
-            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => {
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => Some(
                 self.permission_manager
-                    .allow_tool_persisted_with_identity(tool_name, None);
-            }
-            _ => {}
+                    .allow_tool_persisted_with_identity(tool_name, None),
+            ),
+            _ => None,
+        };
+        if let Some(result) = persist_result {
+            Self::publish_approval_recorded(
+                &bus,
+                &response.correlation_id,
+                Some(originating_tool_call_id.to_string()),
+                result,
+            )
+            .await;
         }
         Gate::Open
     }
@@ -898,10 +935,16 @@ impl ToolExecutor {
         let mut approved = false;
         // 卡片是谁要求弹的，只用于面包屑。
         let mut card_source = "unknown";
+        let mut auto_ask_reason = None;
 
+        let permission_hit = self.permission_manager.check_allowed_with_identity(
+            tool_name,
+            args,
+            permission_identity,
+        );
         if let Some(bus) = &self.message_bus {
             let check = bus
-                .check_tool_policy_for(
+                .check_tool_policy_with_permission_for(
                     &FunctionCall {
                         name: tool_name.to_string(),
                         args: Some(args.clone()),
@@ -912,6 +955,7 @@ impl ToolExecutor {
                     },
                     None,
                     self.config.agent_identity.as_deref(),
+                    permission_hit,
                 )
                 .await;
 
@@ -953,6 +997,7 @@ impl ToolExecutor {
                 PolicyDecision::Allow => approved = true,
                 PolicyDecision::AskUser => {
                     requires_prompt = true;
+                    auto_ask_reason = check.ask_reason;
                     if check.explicit_rule {
                         policy_requires_confirmation = true;
                     }
@@ -1085,6 +1130,9 @@ impl ToolExecutor {
                 } else if policy_requires_confirmation {
                     card_source = "ask_rule";
                     policy_confirmation_details(tool_name, args)
+                } else if let Some(reason) = auto_ask_reason.as_deref() {
+                    card_source = "auto_fallback";
+                    auto_confirmation_details(tool_name, args, reason)
                 } else {
                     card_source = "fallback_default";
                     default_confirmation_details(tool_name, args)
@@ -1143,7 +1191,13 @@ impl ToolExecutor {
             prompt: Some(details.prompt),
             // 「这次为什么要问」——来源在下面填。工具自带的卡（source=tool）
             // 自己的 prompt 已经解释过了，不再重复一行。
-            reason: build_prompt_reason(card_source, requires_prompt, sensitive_hit),
+            reason: build_prompt_reason(card_source, requires_prompt, sensitive_hit).or_else(
+                || {
+                    auto_ask_reason.map(|reason| {
+                        crate::core::i18n::t1("ui.confirm.auto_reason").replace("{reason}", &reason)
+                    })
+                },
+            ),
             // UI 手上只有模型侧的 tool_call.id，靠它把"这张卡"和稍后到达的
             // ToolResult 对上；不上的话卡片收不到自己那次调用的结局。
             originating_tool_call_id: Some(originating_tool_call_id.to_string()),
@@ -1168,14 +1222,22 @@ impl ToolExecutor {
             ));
         }
 
-        self.record_approval(
+        if let Some(result) = self.record_approval(
             tool,
             tool_name,
             args,
             permission_identity,
             &response,
             &on_confirm,
-        );
+        ) {
+            Self::publish_approval_recorded(
+                &bus,
+                &response.correlation_id,
+                Some(originating_tool_call_id.to_string()),
+                result,
+            )
+            .await;
+        }
         Gate::Open
     }
 
@@ -1190,7 +1252,7 @@ impl ToolExecutor {
         on_confirm: &Arc<
             dyn Fn(crate::types::ToolConfirmationOutcome, Option<String>) + Send + Sync,
         >,
-    ) {
+    ) -> Option<std::io::Result<()>> {
         let requested_outcome = response
             .outcome
             .clone()
@@ -1209,6 +1271,10 @@ impl ToolExecutor {
         // 注意 on_confirm 已在上面照常调用 —— 这次调用本身是放行的，
         // 钉住的只是「授权缓存」。
         let sensitive_gated = crate::agent::sensitive_paths::guard_hit(tool_name, args).is_some();
+        let requested_persist = matches!(
+            requested_outcome,
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
+        );
 
         match outcome {
             crate::types::ToolConfirmationOutcome::AllowSession
@@ -1220,6 +1286,12 @@ impl ToolExecutor {
                     "🔐 Permission NOT stored: {} touched a sensitive file — approval is one-shot, it will ask again next time",
                     tool_name
                 ));
+                requested_persist.then(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "persistent permission is disabled for sensitive files",
+                    ))
+                })
             }
             crate::types::ToolConfirmationOutcome::AllowSession => {
                 self.permission_manager
@@ -1228,6 +1300,7 @@ impl ToolExecutor {
                     "🔐 Permission Granted: Allowing tool {} for session",
                     tool_name
                 ));
+                None
             }
             crate::types::ToolConfirmationOutcome::ProceedAlways => {
                 self.permission_manager.allow_action_with_identity(
@@ -1239,17 +1312,48 @@ impl ToolExecutor {
                     "🔐 Permission Granted: Allowing {} for session (signature)",
                     tool_name
                 ));
+                None
             }
             crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave => {
-                self.permission_manager
+                let result = self
+                    .permission_manager
                     .allow_tool_persisted_with_identity(tool_name, permission_identity);
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "🔐 Permission Granted: Persisted allow for tool {}",
-                    tool_name
-                ));
+                if result.is_ok() {
+                    crate::utils::logging::append_debug_log_line(&format!(
+                        "🔐 Permission Granted: Persisted allow for tool {}",
+                        tool_name
+                    ));
+                }
+                Some(result)
             }
-            _ => {}
+            _ if requested_persist => Some(Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "tool does not support persistent permission",
+            ))),
+            _ => None,
         }
+    }
+
+    async fn publish_approval_recorded(
+        bus: &MessageBus,
+        correlation_id: &str,
+        originating_tool_call_id: Option<String>,
+        result: std::io::Result<()>,
+    ) {
+        let (persisted, error) = match result {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error.to_string())),
+        };
+        let _ = bus
+            .publish(Message::ToolApprovalRecorded(ToolApprovalRecorded {
+                message_type: MessageBusType::ToolApprovalRecorded,
+                correlation_id: correlation_id.to_string(),
+                originating_tool_call_id,
+                persisted,
+                requested_persist: true,
+                error,
+            }))
+            .await;
     }
 
     /// 策略拒绝也要让 UI 画得出来：只回一条给模型的错误，界面上看不出是规则拦的。
@@ -4944,6 +5048,219 @@ mod tests {
                     ..Default::default()
                 })
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_registryless_classifies_once_and_reports_the_actual_persistence_result() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::{PolicyEngine, PolicyEngineConfig};
+        use crate::types::ToolConfirmationOutcome;
+        crate::core::i18n::reset_for_tests();
+        for fail_write in [false, true] {
+            let temp = tempfile::tempdir().expect("test directory");
+            let config = Arc::new(Config::new(ConfigParameters {
+                target_dir: temp.path().to_path_buf(),
+                cwd: temp.path().to_path_buf(),
+                ..Default::default()
+            }));
+            let mut policy = PolicyEngine::new(PolicyEngineConfig {
+                approval_mode: Some(crate::core::policy::types::ApprovalMode::Auto),
+                ..Default::default()
+            });
+            policy.set_auto_classifier(
+                mock_classifier(vec![AutoVerdict::Ask {
+                    reason: "AI classifier timed out after 2s".into(),
+                }]),
+                None,
+            );
+            let bus = Arc::new(MessageBus::new(policy, false));
+            let registry = Arc::new(ToolRegistry::new(config.clone()));
+            let mut executor = ToolExecutor::new(
+                StarClient::new("", None, None, None, None),
+                registry,
+                Some(bus.clone()),
+                config,
+            );
+            let parent = temp.path().join("grant-parent");
+            if fail_write {
+                std::fs::write(&parent, "not a directory").expect("block grant directory");
+            }
+            executor.permission_manager = Arc::new(SessionPermissionManager::with_persistence(
+                parent.join("permission_grants.json"),
+            ));
+            let mut rx = bus.subscribe();
+            let response_bus = bus.clone();
+            let responder = tokio::spawn(async move {
+                let mut correlation_id = None;
+                while let Ok(message) = rx.recv().await {
+                    match message {
+                        Message::ToolConfirmationRequest(request) => {
+                            assert!(
+                                request
+                                    .reason
+                                    .as_deref()
+                                    .unwrap()
+                                    .contains("timed out after 2s"),
+                                "unexpected approval reason: {:?}",
+                                request.reason,
+                            );
+                            assert!(!request.prompt.as_deref().unwrap().contains("No allow rule"));
+                            correlation_id = Some(request.correlation_id.clone());
+                            response_bus
+                                .publish(Message::ToolConfirmationResponse(
+                                    ToolConfirmationResponse::from_user_decision(
+                                        request.correlation_id,
+                                        ToolConfirmationOutcome::ProceedAlwaysAndSave,
+                                        None,
+                                    ),
+                                ))
+                                .await
+                                .expect("approval response");
+                        }
+                        Message::ToolApprovalRecorded(receipt) => {
+                            assert_eq!(Some(&receipt.correlation_id), correlation_id.as_ref());
+                            return receipt;
+                        }
+                        _ => {}
+                    }
+                }
+                panic!("approval receipt was not published");
+            });
+            let gate = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                executor.pass_gate_registryless(
+                    "mcp__fixture__write",
+                    &json!({"value":1}),
+                    "origin-write",
+                    None,
+                ),
+            )
+            .await
+            .expect("gate resolves");
+            assert!(
+                matches!(gate, Gate::Open),
+                "write failure must not revoke this approval"
+            );
+            let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), responder)
+                .await
+                .expect("receipt arrives")
+                .expect("responder succeeds");
+            assert_eq!(receipt.persisted, !fail_write);
+            assert_eq!(receipt.error.is_some(), fail_write);
+            assert_eq!(
+                receipt.originating_tool_call_id.as_deref(),
+                Some("origin-write")
+            );
+            assert_eq!(
+                bus.auto_classifier_stats().await.total_classifications,
+                1,
+                "publishing the request must not run a second classification"
+            );
+            assert_eq!(
+                executor
+                    .permission_manager
+                    .check_allowed("mcp__fixture__write", &json!({"value":2})),
+                if fail_write {
+                    PermissionHit::None
+                } else {
+                    PermissionHit::ToolPersisted
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registryless_grants_are_read_back_and_always_survives_recreation() {
+        use crate::core::config::ConfigParameters;
+        use crate::core::policy::PolicyEngine;
+        use crate::types::ToolConfirmationOutcome;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for outcome in [
+            ToolConfirmationOutcome::AllowSession,
+            ToolConfirmationOutcome::ProceedAlwaysAndSave,
+        ] {
+            let temp = tempfile::tempdir().expect("test directory");
+            let mut params = ConfigParameters::default();
+            params.target_dir = temp.path().to_path_buf();
+            params.cwd = temp.path().to_path_buf();
+            let config = Arc::new(Config::new(params));
+            let bus = Arc::new(MessageBus::new(
+                PolicyEngine::new(Default::default()),
+                false,
+            ));
+            let registry = Arc::new(ToolRegistry::new(config.clone()));
+            let executor = ToolExecutor::new(
+                StarClient::new("", None, None, None, None),
+                registry.clone(),
+                Some(bus.clone()),
+                config.clone(),
+            );
+            let prompts = Arc::new(AtomicUsize::new(0));
+            let observed = prompts.clone();
+            let mut rx = bus.subscribe();
+            let response_bus = bus.clone();
+            let selected = outcome.clone();
+            let responder = tokio::spawn(async move {
+                while let Ok(message) = rx.recv().await {
+                    if let Message::ToolConfirmationRequest(request) = message {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        response_bus
+                            .publish(Message::ToolConfirmationResponse(
+                                ToolConfirmationResponse::from_user_decision(
+                                    request.correlation_id,
+                                    selected.clone(),
+                                    None,
+                                ),
+                            ))
+                            .await
+                            .expect("approval response");
+                    }
+                }
+            });
+            for n in 0..2 {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    executor.pass_gate_registryless(
+                        "mcp__fixture__search",
+                        &json!({"query":n}),
+                        "fixture",
+                        None,
+                    ),
+                )
+                .await
+                .expect("gate must resolve");
+                assert!(matches!(result, Gate::Open));
+            }
+            assert_eq!(
+                prompts.load(Ordering::SeqCst),
+                1,
+                "grant must cover the next call"
+            );
+            if outcome == ToolConfirmationOutcome::ProceedAlwaysAndSave {
+                let recreated = ToolExecutor::new(
+                    StarClient::new("", None, None, None, None),
+                    registry,
+                    Some(bus.clone()),
+                    config,
+                );
+                let result = recreated
+                    .pass_gate_registryless(
+                        "mcp__fixture__search",
+                        &json!({"query":3}),
+                        "fresh",
+                        None,
+                    )
+                    .await;
+                assert!(matches!(result, Gate::Open));
+                assert_eq!(
+                    prompts.load(Ordering::SeqCst),
+                    1,
+                    "persisted grant must reload"
+                );
+            }
+            responder.abort();
         }
     }
 

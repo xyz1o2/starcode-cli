@@ -111,6 +111,17 @@ pub async fn relay_confirmation_bus_message(
                 })
                 .await;
         }
+        Message::ToolApprovalRecorded(receipt) => {
+            let _ = tx
+                .send(StreamMessage::ToolApprovalRecorded {
+                    correlation_id: receipt.correlation_id,
+                    originating_tool_call_id: receipt.originating_tool_call_id,
+                    persisted: receipt.persisted,
+                    requested_persist: receipt.requested_persist,
+                    error: receipt.error,
+                })
+                .await;
+        }
         Message::ContextUpdated(_ctx) => {
             let _ = tx
                 .send(StreamMessage::StatsUpdate {

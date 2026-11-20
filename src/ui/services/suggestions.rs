@@ -122,9 +122,17 @@ pub fn on_input_changed(state: &mut ChatState) {
 
     refresh_mention_hints(state);
 
-    if state.input.starts_with('/') && !state.show_mention_hints {
+    state.plugin_commands.inline_selection_lost = false;
+    refresh_command_hints(state);
+}
+
+pub(crate) fn refresh_command_hints(state: &mut ChatState) {
+    if state.input.starts_with('/') && !state.show_mention_hints && !should_suppress_hints(state) {
         state.show_command_hints = true;
-        state.command_hints = crate::commands::system::get_command_hints(&state.input);
+        state.command_hints = crate::commands::system::get_command_hints_with_plugins(
+            &state.input,
+            state.plugin_commands.candidates(),
+        );
         state.selected_hint = 0;
     } else {
         state.show_command_hints = false;
@@ -180,6 +188,7 @@ pub fn handle_up(state: &mut ChatState) -> bool {
         return true;
     }
     if state.show_command_hints && !state.command_hints.is_empty() {
+        state.plugin_commands.inline_selection_lost = false;
         if state.selected_hint > 0 {
             state.selected_hint -= 1;
         }
@@ -214,6 +223,7 @@ pub fn handle_down(state: &mut ChatState) -> bool {
         return true;
     }
     if state.show_command_hints && !state.command_hints.is_empty() {
+        state.plugin_commands.inline_selection_lost = false;
         if state.selected_hint + 1 < state.command_hints.len() {
             state.selected_hint += 1;
         }
@@ -249,6 +259,7 @@ fn update_textarea_from_input(state: &mut ChatState) {
 }
 
 pub fn handle_enter(state: &mut ChatState) -> bool {
+    crate::ui::services::plugin_commands::invalidate_changed_root(state);
     if state.show_session_menu {
         let sessions =
             crate::ui::components::palette::get_session_quick_items(&state.available_sessions);
@@ -275,8 +286,14 @@ pub fn handle_enter(state: &mut ChatState) -> bool {
         return true;
     }
 
+    if state.show_command_hints && state.plugin_commands.inline_selection_lost {
+        state.plugin_commands.inline_selection_lost = false;
+        return true;
+    }
     if state.show_command_hints && !state.command_hints.is_empty() {
-        let selected = &state.command_hints[state.selected_hint];
+        let Some(selected) = state.command_hints.get(state.selected_hint) else {
+            return true;
+        };
         let cmd_text = extract_hint_primary_text(selected);
 
         // 如果提取出的命令文本已经是一个完整的命令路径（例如 /memory add），
@@ -301,13 +318,20 @@ pub fn handle_enter(state: &mut ChatState) -> bool {
 }
 
 pub fn handle_tab(state: &mut ChatState) -> bool {
+    crate::ui::services::plugin_commands::invalidate_changed_root(state);
     if state.show_mention_hints && !state.mention_hints.is_empty() {
         accept_mention_hint(state);
         return true;
     }
 
+    if state.show_command_hints && state.plugin_commands.inline_selection_lost {
+        state.plugin_commands.inline_selection_lost = false;
+        return true;
+    }
     if state.show_command_hints && !state.command_hints.is_empty() {
-        let selected = &state.command_hints[state.selected_hint];
+        let Some(selected) = state.command_hints.get(state.selected_hint) else {
+            return true;
+        };
         let cmd_text = extract_hint_primary_text(selected);
 
         if cmd_text.starts_with('/') {
@@ -487,6 +511,56 @@ mod tests {
         state.input = "读 @\"src".to_string();
         on_input_changed(&mut state);
         assert!(state.show_mention_hints, "未闭合的 @\" 仍应激活提示");
+    }
+
+    #[test]
+    fn unmatched_command_completion_preserves_input_on_enter_and_tab() {
+        for input in ["/zzzzzzzzzz", "/mcp zzzzzzzzzz"] {
+            for use_tab in [false, true] {
+                let mut state = ChatState::test_fixture();
+                state.set_input_text(input);
+                on_input_changed(&mut state);
+                let accepted = if use_tab {
+                    handle_tab(&mut state)
+                } else {
+                    handle_enter(&mut state)
+                };
+                assert!(
+                    !accepted,
+                    "unknown input must not accept an unrelated completion: {input}, tab={use_tab}"
+                );
+                assert_eq!(state.input, input, "tab={use_tab}");
+                assert_eq!(state.textarea.lines().join("\n"), input, "tab={use_tab}");
+                assert!(state.command_hints.is_empty(), "input={input}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_command_queries_still_offer_completions() {
+        for input in ["/", "/mcp "] {
+            let mut state = ChatState::test_fixture();
+            state.set_input_text(input);
+            on_input_changed(&mut state);
+            assert!(state.show_command_hints, "input={input}");
+            assert!(!state.command_hints.is_empty(), "input={input}");
+            assert!(
+                crate::commands::system::command_palette_items(input)
+                    .iter()
+                    .all(|item| item.label.starts_with(input)),
+                "completion paths must preserve their command level: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmatched_command_queries_leave_palette_empty() {
+        for input in ["/zzzzzzzzzz", "/mcp zzzzzzzzzz"] {
+            assert!(
+                crate::commands::system::command_palette_items(input).is_empty(),
+                "unknown input must not offer unrelated palette entries: {input}"
+            );
+        }
     }
 
     #[test]

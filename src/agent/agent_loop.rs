@@ -212,7 +212,7 @@ impl Agent {
         let mut project_map_attempted = false;
         let skip_verification =
             crate::agent::policies::automation::should_skip_verification(user_input);
-        let mut verification_required = false;
+        let mut verification_required = crate::agent::tool_helpers::VerificationState::default();
         let tool_loop_repeat_threshold = resolved_tool_loop_repeat_threshold();
         let mut tool_signature_history: VecDeque<String> = VecDeque::new();
         let mut tool_loop_interventions = 0usize;
@@ -979,7 +979,7 @@ impl Agent {
         editor_skill_attempted: &mut bool,
         project_map_attempted: &mut bool,
         skip_verification: bool,
-        verification_required: &mut bool,
+        verification_required: &mut crate::agent::tool_helpers::VerificationState,
         tool_loop_repeat_threshold: usize,
         tool_signature_history: &mut VecDeque<String>,
         tool_loop_interventions: &mut usize,
@@ -1023,6 +1023,27 @@ impl Agent {
         }
 
         let turn_active_tools = turn_tool_selection.selected_names.clone();
+        self.settle_pending_verification(
+            user_input,
+            messages,
+            &turn_active_tools,
+            current_turn,
+            verification_required,
+            skip_verification,
+            loop_state,
+        )
+        .await;
+        if self
+            .abort_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self
+                .abort_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return TurnResult::Continue;
+        }
         crate::utils::logging::append_debug_log_line(&format!(
             "[TOOL_ROUTER] turn={} profile={} shortlist={}/{} rationale={}",
             current_turn,

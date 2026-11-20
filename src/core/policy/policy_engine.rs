@@ -40,6 +40,14 @@ pub struct CheckResult {
     /// 两者混为一谈的后果：没有任何 settings 的普通用户点「本会话允许」后，
     /// 下一次仍然弹框，因为兜底 AskUser 一直被当成"策略点名要求确认"。
     pub explicit_rule: bool,
+    /// Auto 退回询问的实际原因，不参与授权决策。
+    pub ask_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvaluationStage {
+    Complete,
+    LocalRecheck,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,7 +162,9 @@ impl PolicyEngine {
         }
         let classifier = self.auto_classifier.as_ref()?;
         if !classifier.is_available() {
-            return None;
+            return Some(crate::core::auto_mode::service::AutoVerdict::Ask {
+                reason: classifier.unavailable_reason().to_string(),
+            });
         }
 
         let transcript = self
@@ -470,17 +480,10 @@ impl PolicyEngine {
             .map(|s| s.to_string())
     }
 
-    /// 判定顺序（对标 Claude Code）：
+    /// 先检查显式拒绝、本轮禁用与模式硬限制，再检查显式询问。
     ///
-    /// 1. `deny` 规则 —— 连 bypassPermissions 和"本会话总是允许"都压不住，用户写 deny 就是要绝对拦住；
-    /// 2. skill 的 `disallowed-tools`（本轮禁用）—— 用户显式禁的，比任何放行都强；
-    /// 3. 会话内的"总是允许"；
-    /// 4. skill 的 `allowed-tools`（本轮免确认）—— 比审批模式**弱**：
-    ///    它只免确认，不能覆盖用户写的 `ask` 规则（见 §5）；
-    /// 5. 审批模式（bypassPermissions 全放 / plan 只放只读 / default 与 acceptEdits 放各自的只读集合）；
-    /// 6. `allow` 规则 —— 命中即免确认，这是 allow 存在的唯一意义；
-    /// 7. `ask` 规则 —— 命中则强制弹确认，哪怕默认是放行；
-    /// 8. 旧的 `PolicyRule` 列表，最后落到 `default_decision`。
+    /// 授权只能跳过这些限制之后的默认询问及分类器。每个规则来源只评价一次；
+    /// `PolicyRule` 保持优先级排序后的首条匹配，不能把被遮蔽的规则提升为硬限制。
     pub async fn check(&self, tool_call: &FunctionCall, server_name: Option<&str>) -> CheckResult {
         self.check_for(tool_call, server_name, None).await
     }
@@ -491,26 +494,80 @@ impl PolicyEngine {
         server_name: Option<&str>,
         policy_identity: Option<&str>,
     ) -> CheckResult {
-        let args = tool_call.args.clone().unwrap_or(serde_json::Value::Null);
-        let settings_verdict = self.settings_permissions.evaluate(&tool_call.name, &args);
-        let legacy_verdict = self.legacy_verdict(&tool_call.name, &args);
+        self.check_with_permission_for(
+            tool_call,
+            server_name,
+            policy_identity,
+            crate::core::permissions::PermissionHit::None,
+        )
+        .await
+    }
 
-        // 1. deny 优先于一切
-        for (verdict, reason) in [&settings_verdict, &legacy_verdict].into_iter().flatten() {
+    /// 用户授权只覆盖默认询问，不覆盖当前规则或模式的禁止与显式询问。
+    pub(crate) async fn check_with_permission_for(
+        &self,
+        tool_call: &FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+        permission: crate::core::permissions::PermissionHit,
+    ) -> CheckResult {
+        self.evaluate_for(
+            tool_call,
+            server_name,
+            policy_identity,
+            permission,
+            EvaluationStage::Complete,
+        )
+        .await
+    }
+
+    /// 发布确认前只复查本地策略，不调用分类器；返回 Allow 也不能替用户确认。
+    pub(crate) async fn recheck_local_for(
+        &self,
+        tool_call: &FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+    ) -> CheckResult {
+        self.evaluate_for(
+            tool_call,
+            server_name,
+            policy_identity,
+            crate::core::permissions::PermissionHit::None,
+            EvaluationStage::LocalRecheck,
+        )
+        .await
+    }
+
+    async fn evaluate_for(
+        &self,
+        tool_call: &FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+        permission: crate::core::permissions::PermissionHit,
+        stage: EvaluationStage,
+    ) -> CheckResult {
+        use crate::core::auto_mode::service::AutoVerdict;
+
+        let empty_args = serde_json::Value::Null;
+        let args = tool_call.args.as_ref().unwrap_or(&empty_args);
+        let settings_verdict = self.settings_permissions.evaluate(&tool_call.name, args);
+        let legacy_verdict = self.legacy_verdict(&tool_call.name, args);
+        let verdicts = [settings_verdict.as_ref(), legacy_verdict.as_ref()];
+        let stringified_args = tool_call.args.as_ref().map(serde_json::Value::to_string);
+        let configured_rule = self.rules.iter().find(|rule| {
+            self.rule_matches(rule, tool_call, stringified_args.as_deref(), server_name)
+        });
+
+        for (verdict, reason) in verdicts.into_iter().flatten() {
             if *verdict == RuleVerdict::Deny {
                 return CheckResult {
                     decision: PolicyDecision::DenyWithReason(reason.clone()),
                     rule: None,
                     explicit_rule: true,
+                    ask_reason: None,
                 };
             }
         }
-
-        // 2. skill 的 `disallowed-tools`：本轮从可用池移除。
-        //
-        // 放在 session_allowances 之前 —— 「本轮不许用」比「本会话总是允许」
-        // 更具体、更当下。skill 说别用 AskUserQuestion，就不该因为上一轮
-        // 点过「总是允许」而继续弹。
         if self.is_turn_denied_for(policy_identity, &tool_call.name) {
             return CheckResult {
                 decision: PolicyDecision::DenyWithReason(format!(
@@ -519,214 +576,197 @@ impl PolicyEngine {
                 )),
                 rule: None,
                 explicit_rule: false,
+                ask_reason: None,
+            };
+        }
+        if self.approval_mode == ApprovalMode::Plan
+            && !crate::types::is_safe_query_tool(&tool_call.name)
+            && constants::resolve_registered_tool_name(&tool_call.name) != "ExitPlanMode"
+        {
+            return CheckResult {
+                decision: PolicyDecision::Deny,
+                rule: None,
+                explicit_rule: false,
+                ask_reason: None,
+            };
+        }
+        // 本地判定只做一次，硬拒绝必须先于所有授权，白名单仍沿用原来的口径。
+        let local_verdict = match self.approval_mode {
+            ApprovalMode::Default | ApprovalMode::AcceptEdits | ApprovalMode::Auto => {
+                self.mode_auto_verdict(&tool_call.name, args, tool_call.read_only)
+            }
+            _ => AutoVerdict::Undecided,
+        };
+        if let AutoVerdict::Deny { reason } = local_verdict {
+            return CheckResult {
+                decision: PolicyDecision::DenyWithReason(reason),
+                rule: None,
+                explicit_rule: false,
+                ask_reason: None,
             };
         }
 
-        // 3. 会话内已经点过"总是允许"
-        if self.session_allowances.contains(&tool_call.name) {
+        if self.approval_mode == ApprovalMode::BypassPermissions {
             return CheckResult {
                 decision: PolicyDecision::Allow,
                 rule: None,
                 explicit_rule: false,
+                ask_reason: None,
             };
         }
 
-        // 4. skill 的 `allowed-tools`：本轮免确认。
-        //
-        // **放在审批模式之前，但不放���显式 `ask` 规则之前** —— 显式 `ask`
-        // 规则的语义是"每次都问我"，那比 skill 的免确认强（skill 是用户自己
-        // 写的，但它不能推翻用户在 settings.json 里写的 `ask`）。
-        if self.is_turn_granted_for(policy_identity, &tool_call.name) {
-            let asked_by_rule = [&settings_verdict, &legacy_verdict]
-                .into_iter()
-                .flatten()
-                .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
-            if !asked_by_rule {
+        // Settings 与 legacy 决策源在 PolicyRule 之前；但命中的 PolicyRule deny
+        // 必须早于 grants，避免授权绕过拒绝。
+        if settings_verdict.is_none() && legacy_verdict.is_none() {
+            if let Some(rule) = configured_rule.filter(|rule| {
+                matches!(
+                    rule.decision,
+                    PolicyDecision::Deny | PolicyDecision::DenyWithReason(_)
+                )
+            }) {
                 return CheckResult {
-                    decision: PolicyDecision::Allow,
-                    rule: None,
-                    explicit_rule: false,
+                    decision: rule.decision.clone(),
+                    rule: Some(rule.clone()),
+                    explicit_rule: true,
+                    ask_reason: None,
                 };
             }
         }
 
-        // 3. 审批模式
-        match self.approval_mode {
-            ApprovalMode::BypassPermissions => {
-                return CheckResult {
-                    decision: PolicyDecision::Allow,
-                    rule: None,
-                    explicit_rule: false,
-                };
-            }
-            ApprovalMode::Plan => {
-                // Plan 模式只放只读工具和 exit_plan_mode。重新进入 plan 模式没意义，
-                // 还会把 agent 困在 enter/exit 循环里，准备好了就用 exit_plan_mode。
-                let is_safe = crate::types::is_safe_query_tool(&tool_call.name);
-                let is_exit =
-                    crate::core::tools::constants::resolve_registered_tool_name(&tool_call.name)
-                        == "ExitPlanMode";
-                return CheckResult {
-                    decision: if is_safe || is_exit {
-                        PolicyDecision::Allow
-                    } else {
-                        PolicyDecision::Deny
-                    },
-                    rule: None,
-                    explicit_rule: false,
-                };
-            }
+        // 各来源内部按原优先级处理：settings 高于 legacy，二者均高于 PolicyRule。
+        // 被更高优先级 allow 覆盖的低优先级 ask 不能反过来压住它；仍生效的 ask
+        // 必须先于 session/skill/permission grant。
+        let settings_allow = settings_verdict
+            .as_ref()
+            .is_some_and(|(verdict, _)| *verdict == RuleVerdict::Allow);
+        let legacy_allow = legacy_verdict
+            .as_ref()
+            .is_some_and(|(verdict, _)| *verdict == RuleVerdict::Allow);
+        let settings_ask = settings_verdict
+            .as_ref()
+            .is_some_and(|(verdict, _)| *verdict == RuleVerdict::Ask);
+        let legacy_ask = legacy_verdict
+            .as_ref()
+            .is_some_and(|(verdict, _)| *verdict == RuleVerdict::Ask);
+        let asking_rule = configured_rule.filter(|rule| rule.decision == PolicyDecision::AskUser);
+        let rule_ask = asking_rule.is_some() && !settings_allow && !legacy_allow;
+        if settings_ask || (!settings_allow && legacy_ask) || rule_ask {
+            let decision = if self.approval_mode == ApprovalMode::DontAsk {
+                PolicyDecision::DenyWithReason(format!(
+                    "dontAsk mode: `{}` requires confirmation and no one can answer; \\
+                     grant it explicitly in permissions.allow if needed",
+                    tool_call.name
+                ))
+            } else {
+                self.apply_non_interactive_mode(PolicyDecision::AskUser)
+            };
+            return CheckResult {
+                decision,
+                rule: if settings_ask || (!settings_allow && legacy_ask) {
+                    None
+                } else {
+                    asking_rule.cloned()
+                },
+                explicit_rule: true,
+                ask_reason: None,
+            };
+        }
+
+        if self.session_allowances.contains(&tool_call.name)
+            || self.is_turn_granted_for(policy_identity, &tool_call.name)
+            || permission != crate::core::permissions::PermissionHit::None
+        {
+            return CheckResult {
+                decision: PolicyDecision::Allow,
+                rule: None,
+                explicit_rule: false,
+                ask_reason: None,
+            };
+        }
+
+        let mode_allows = match self.approval_mode {
+            ApprovalMode::BypassPermissions | ApprovalMode::Plan => true,
             ApprovalMode::DontAsk => {
-                // 对标 Claude Code 的 `dontAsk`：不弹任何确认，会弹的一律直接拒。
-                // 只读操作照常放行（模式语义与 default 的只读集合一致），
-                // 其余落到下面的规则层 —— 显式 `allow` 规则仍能放行，
-                // 显式 `ask` 规则在这里被翻成 Deny（没有人能回答它）。
-                let asked_by_rule = [&settings_verdict, &legacy_verdict]
-                    .into_iter()
-                    .flatten()
-                    .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
-                if !asked_by_rule
-                    && (crate::types::is_safe_query_tool(&tool_call.name)
-                        || crate::types::is_readonly_fs_command(&tool_call.name, &args))
-                {
-                    return CheckResult {
-                        decision: PolicyDecision::Allow,
-                        rule: None,
-                        explicit_rule: false,
-                    };
-                }
-                // 会弹确认的（以及显式 ask 命中的）→ 直接拒。
-                return CheckResult {
-                    decision: PolicyDecision::DenyWithReason(format!(
-                        "dontAsk mode: `{}` requires confirmation and no one can answer; \
-                         grant it explicitly in permissions.allow if needed",
-                        tool_call.name
-                    )),
-                    rule: None,
-                    explicit_rule: false,
-                };
+                crate::types::is_safe_query_tool(&tool_call.name)
+                    || crate::types::is_readonly_fs_command(&tool_call.name, args)
             }
-            // Default / AcceptEdits / Auto 都不在这里 return：模式内置的放行集合要排在显式
-            // `ask` 规则之后生效 —— 用户写 `ask: ["Read"]` 就是"每次都问我"，模式默认值不能
-            // 把它吃掉。Auto 走三态判定（见 mode_auto_verdict）：本地护栏能判的直接判，
-            // 判不了的交给 LLM 分类器，分类器也判不出来才落到弹确认。
-            ApprovalMode::Default | ApprovalMode::AcceptEdits | ApprovalMode::Auto => {
-                let asked_by_rule = [&settings_verdict, &legacy_verdict]
-                    .into_iter()
-                    .flatten()
-                    .any(|(verdict, _)| *verdict == RuleVerdict::Ask);
-
-                if !asked_by_rule {
-                    match self.mode_auto_verdict(&tool_call.name, &args, tool_call.read_only) {
-                        crate::core::auto_mode::service::AutoVerdict::Allow { .. } => {
-                            return CheckResult {
-                                decision: PolicyDecision::Allow,
-                                rule: None,
-                                explicit_rule: false,
-                            };
-                        }
-                        crate::core::auto_mode::service::AutoVerdict::Deny { reason } => {
-                            // 本地护栏的硬拦截 —— 与规则 deny 同级，直接拒。
-                            return CheckResult {
-                                decision: PolicyDecision::DenyWithReason(reason),
-                                rule: None,
-                                explicit_rule: false,
-                            };
-                        }
-                        crate::core::auto_mode::service::AutoVerdict::Undecided => {
-                            // 只有 auto 档位才有分类器可问；default/acceptEdits 落到下面
-                            // 的规则与兜底逻辑，和改动前完全一致。
-                            match self.classify_with_llm(&tool_call.name, &args).await {
-                                Some(crate::core::auto_mode::service::AutoVerdict::Allow {
-                                    ..
-                                }) => {
-                                    return CheckResult {
-                                        decision: PolicyDecision::Allow,
-                                        rule: None,
-                                        explicit_rule: false,
-                                    };
-                                }
-                                Some(crate::core::auto_mode::service::AutoVerdict::Deny {
-                                    reason,
-                                }) => {
-                                    return CheckResult {
-                                        decision: PolicyDecision::DenyWithReason(reason),
-                                        rule: None,
-                                        explicit_rule: false,
-                                    };
-                                }
-                                // 分类器**不可用**（没装 / 熔断 / provider 挂了）。
-                                //
-                                // 这里**不放行** —— 分类器失灵时唯一安全的失败方向是
-                                // 「问人」（既有测试
-                                // `auto_mode_asks_when_no_classifier_is_installed`
-                                // 锁的就是这条）。放宽权限不是这里能做的事。
-                                //
-                                // 「老是弹窗」的真因不在这里，而在**分类器为什么失灵**
-                                // —— 见 `auto_mode::service` 里对分类器模型的解析与
-                                // 判词解析的处理。
-                                None => {}
-                                // Ask / Undecided → 继续往下走，最终落到弹确认。
-                                Some(_) => {}
-                            }
-                        }
-                        crate::core::auto_mode::service::AutoVerdict::Ask { .. } => {}
-                    }
-                }
-            }
-        }
-
-        // 4./5. allow 命中就免确认；ask 命中就强制确认
-        for (verdict, _) in [&settings_verdict, &legacy_verdict].into_iter().flatten() {
-            match verdict {
-                RuleVerdict::Allow => {
-                    return CheckResult {
-                        decision: PolicyDecision::Allow,
-                        rule: None,
-                        explicit_rule: true,
-                    };
-                }
-                RuleVerdict::Ask => {
-                    // 显式 ask 规则：用户写下的"每次都问我"。`explicit_rule` 为 true，
-                    // 调用方据此让会话里的"本会话允许"失效。
-                    return CheckResult {
-                        decision: self.apply_non_interactive_mode(PolicyDecision::AskUser),
-                        rule: None,
-                        explicit_rule: true,
-                    };
-                }
-                RuleVerdict::Deny => {}
-            }
-        }
-
-        let stringified_args = if tool_call.args.is_some() {
-            serde_json::to_string(&tool_call.args).ok()
-        } else {
-            None
+            _ => matches!(local_verdict, AutoVerdict::Allow { .. }),
         };
-
-        let mut matched_rule: Option<PolicyRule> = None;
-        let mut decision: Option<PolicyDecision> = None;
-
-        for rule in &self.rules {
-            if self.rule_matches(rule, tool_call, stringified_args.as_deref(), server_name) {
-                decision = Some(self.apply_non_interactive_mode(rule.decision.clone()));
-                matched_rule = Some(rule.clone());
-                break;
-            }
+        if mode_allows {
+            return CheckResult {
+                decision: PolicyDecision::Allow,
+                rule: None,
+                explicit_rule: false,
+                ask_reason: None,
+            };
         }
 
-        if decision.is_none() {
-            // 兜底：没命中任何规则。默认是 AskUser，但那是"保守起见问一下"，
-            // 不是用户写下的规则 —— `explicit_rule` 必须为 false，否则「本会话允许」
-            // 会永久失效（这正是本函数原先没有区分、导致的问题）。
-            decision = Some(self.apply_non_interactive_mode(self.default_decision.clone()));
+        // 保留 settings → legacy → 首条 PolicyRule 的来源顺序，且显式 allow 不问分类器。
+        if verdicts
+            .into_iter()
+            .flatten()
+            .any(|(verdict, _)| *verdict == RuleVerdict::Allow)
+        {
+            return CheckResult {
+                decision: PolicyDecision::Allow,
+                rule: None,
+                explicit_rule: true,
+                ask_reason: None,
+            };
+        }
+        if let Some(rule) = configured_rule {
+            return CheckResult {
+                decision: self.apply_non_interactive_mode(rule.decision.clone()),
+                rule: Some(rule.clone()),
+                explicit_rule: true,
+                ask_reason: None,
+            };
+        }
+
+        if self.approval_mode == ApprovalMode::DontAsk {
+            return CheckResult {
+                decision: PolicyDecision::DenyWithReason(format!(
+                    "dontAsk mode: `{}` requires confirmation and no one can answer; \
+                     grant it explicitly in permissions.allow if needed",
+                    tool_call.name
+                )),
+                rule: None,
+                explicit_rule: false,
+                ask_reason: None,
+            };
+        }
+        if self.approval_mode == ApprovalMode::Auto {
+            let verdict = if stage == EvaluationStage::Complete {
+                self.classify_with_llm(&tool_call.name, args).await
+            } else {
+                None
+            };
+            // Ask、超时及不可用都必须询问，不能被 default_decision: Allow 降级。
+            let ask_reason = match &verdict {
+                Some(AutoVerdict::Ask { reason }) => Some(reason.clone()),
+                None if stage == EvaluationStage::Complete => {
+                    Some("AI classifier is not configured — asking the user instead".to_string())
+                }
+                _ => None,
+            };
+            let decision = match verdict {
+                Some(AutoVerdict::Allow { .. }) => PolicyDecision::Allow,
+                Some(AutoVerdict::Deny { reason }) => PolicyDecision::DenyWithReason(reason),
+                _ => self.apply_non_interactive_mode(PolicyDecision::AskUser),
+            };
+            return CheckResult {
+                decision,
+                rule: None,
+                explicit_rule: false,
+                ask_reason,
+            };
         }
 
         CheckResult {
-            decision: decision.unwrap(),
-            rule: matched_rule.clone(),
-            explicit_rule: matched_rule.is_some(),
+            decision: self.apply_non_interactive_mode(self.default_decision.clone()),
+            rule: None,
+            explicit_rule: false,
+            ask_reason: None,
         }
     }
 
@@ -1587,6 +1627,331 @@ mod tests {
             PolicyDecision::Allow,
             "危险命令不能被分类器放行"
         );
+    }
+
+    #[tokio::test]
+    async fn local_recheck_skips_classifier_and_detects_latest_denials() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+
+        let mut engine = engine_in(ApprovalMode::Auto);
+        engine.set_auto_classifier(
+            mock_classifier(vec![AutoVerdict::Ask {
+                reason: "unsure".into(),
+            }]),
+            None,
+        );
+        let tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+        assert_eq!(
+            engine.check(&tool_call, None).await.decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(engine.auto_classifier_stats().total_classifications, 1);
+        assert_eq!(
+            engine
+                .recheck_local_for(&tool_call, None, None)
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
+        engine.set_settings_permissions(SettingsPermissions {
+            deny: vec![PermissionRuleSpec::parse("Write").unwrap()],
+            ..Default::default()
+        });
+        assert!(matches!(
+            engine
+                .recheck_local_for(&tool_call, None, None)
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+        engine.set_settings_permissions(SettingsPermissions::default());
+        engine.apply_turn_tool_policy_for(Some("child"), &[], &["Write".into()]);
+        assert!(matches!(
+            engine
+                .recheck_local_for(&tool_call, None, Some("child"))
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+        engine.set_approval_mode(ApprovalMode::Plan);
+        assert_eq!(
+            engine
+                .recheck_local_for(&tool_call, None, None)
+                .await
+                .decision,
+            PolicyDecision::Deny
+        );
+        engine.set_approval_mode(ApprovalMode::Auto);
+        assert!(matches!(
+            engine
+                .recheck_local_for(
+                    &call("Write", serde_json::json!({"file_path": "/etc/passwd"})),
+                    None,
+                    None
+                )
+                .await
+                .decision,
+            PolicyDecision::DenyWithReason(_)
+        ));
+        engine.set_approval_mode(ApprovalMode::BypassPermissions);
+        assert_eq!(
+            engine
+                .recheck_local_for(&tool_call, None, None)
+                .await
+                .decision,
+            PolicyDecision::Allow
+        );
+        assert_eq!(engine.auto_classifier_stats().total_classifications, 1);
+    }
+
+    #[tokio::test]
+    async fn permission_hits_skip_auto_classifier_but_not_ask_or_deny() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+        use crate::core::permissions::PermissionHit;
+
+        for hit in [
+            PermissionHit::ToolSession,
+            PermissionHit::ToolPersisted,
+            PermissionHit::SignatureSession,
+            PermissionHit::SignaturePersisted,
+        ] {
+            let mut engine = engine_in(ApprovalMode::Auto);
+            engine.set_auto_classifier(
+                mock_classifier(vec![AutoVerdict::Deny {
+                    reason: "must not be consulted for an existing grant".into(),
+                }]),
+                None,
+            );
+            let tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+            let result = engine
+                .check_with_permission_for(&tool_call, None, None, hit)
+                .await;
+            assert_eq!(result.decision, PolicyDecision::Allow, "hit {hit:?}");
+            assert!(!result.explicit_rule);
+            assert!(result.rule.is_none());
+            engine.set_settings_permissions(SettingsPermissions {
+                ask: vec![PermissionRuleSpec::parse("Write").unwrap()],
+                ..Default::default()
+            });
+            let result = engine
+                .check_with_permission_for(&tool_call, None, None, hit)
+                .await;
+            assert_eq!(result.decision, PolicyDecision::AskUser);
+            assert!(result.explicit_rule);
+            engine.set_settings_permissions(SettingsPermissions {
+                deny: vec![PermissionRuleSpec::parse("Write").unwrap()],
+                ..Default::default()
+            });
+            assert!(matches!(
+                engine
+                    .check_with_permission_for(&tool_call, None, None, hit)
+                    .await
+                    .decision,
+                PolicyDecision::DenyWithReason(_)
+            ));
+            engine.set_settings_permissions(SettingsPermissions::default());
+            assert!(matches!(
+                engine
+                    .check_with_permission_for(
+                        &call("Write", serde_json::json!({"file_path": "/etc/passwd"})),
+                        None,
+                        None,
+                        hit
+                    )
+                    .await
+                    .decision,
+                PolicyDecision::DenyWithReason(_)
+            ));
+            engine.apply_turn_tool_policy_for(Some("child"), &[], &["Write".into()]);
+            assert!(matches!(
+                engine
+                    .check_with_permission_for(&tool_call, None, Some("child"), hit)
+                    .await
+                    .decision,
+                PolicyDecision::DenyWithReason(_)
+            ));
+            assert_eq!(engine.auto_classifier_stats().total_classifications, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_denies_writes_despite_all_grant_sources() {
+        use crate::core::permissions::PermissionHit;
+
+        let mut engine = engine_in(ApprovalMode::Plan);
+        engine.allow_tool_for_session("Write".into());
+        engine.apply_turn_tool_policy(&["Write".into()], &[]);
+        engine.apply_turn_tool_policy_for(Some("child"), &["Write".into()], &[]);
+        engine.set_settings_permissions(SettingsPermissions {
+            allow: vec![PermissionRuleSpec::parse("Write").unwrap()],
+            ..Default::default()
+        });
+        let mut tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+        tool_call.read_only = Some(true);
+        for identity in [None, Some("child")] {
+            for hit in [
+                PermissionHit::None,
+                PermissionHit::ToolSession,
+                PermissionHit::ToolPersisted,
+                PermissionHit::SignatureSession,
+                PermissionHit::SignaturePersisted,
+            ] {
+                assert_eq!(
+                    engine
+                        .check_with_permission_for(&tool_call, None, identity, hit)
+                        .await
+                        .decision,
+                    PolicyDecision::Deny,
+                    "Plan must reject a write even with {identity:?}/{hit:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_source_ask_is_not_overridden_by_allow_or_grants() {
+        use crate::core::permission_rules::{PermissionRule, RuleSource};
+        use crate::core::permissions::PermissionHit;
+
+        for settings_ask in [false, true] {
+            let mut engine = engine_in(ApprovalMode::Default);
+            let spec = PermissionRuleSpec::parse("Write").unwrap();
+            engine.set_settings_permissions(if settings_ask {
+                SettingsPermissions {
+                    ask: vec![spec],
+                    ..Default::default()
+                }
+            } else {
+                SettingsPermissions {
+                    allow: vec![spec],
+                    ..Default::default()
+                }
+            });
+            engine
+                .get_permission_rule_engine_mut()
+                .add_rule(PermissionRule {
+                    id: "fixture".into(),
+                    name: "fixture".into(),
+                    tool_pattern: "Write".into(),
+                    path_pattern: None,
+                    priority: 10,
+                    source: RuleSource::Project,
+                    action: if settings_ask {
+                        PermissionAction::Allow
+                    } else {
+                        PermissionAction::Ask("confirm every call".into())
+                    },
+                });
+            let tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+            let result = engine
+                .check_with_permission_for(&tool_call, None, None, PermissionHit::None)
+                .await;
+            assert_eq!(
+                result.decision,
+                if settings_ask {
+                    PolicyDecision::AskUser
+                } else {
+                    PolicyDecision::Allow
+                },
+                "settings_ask={settings_ask}"
+            );
+            assert!(result.explicit_rule);
+
+            engine.allow_tool_for_session("Write".into());
+            engine.apply_turn_tool_policy(&["Write".into()], &[]);
+            let result = engine
+                .check_with_permission_for(&tool_call, None, None, PermissionHit::ToolSession)
+                .await;
+            assert_eq!(
+                result.decision,
+                if settings_ask {
+                    PolicyDecision::AskUser
+                } else {
+                    PolicyDecision::Allow
+                },
+                "settings_ask={settings_ask} with grants"
+            );
+            assert_eq!(result.explicit_rule, settings_ask);
+            engine.set_approval_mode(ApprovalMode::DontAsk);
+            let decision = engine.check(&tool_call, None).await.decision;
+            if settings_ask {
+                let PolicyDecision::DenyWithReason(reason) = decision else {
+                    panic!("an explicit ask rule must remain denied in dontAsk mode");
+                };
+                assert!(reason.contains("`Write` requires confirmation"));
+                assert!(reason.contains("grant it explicitly in permissions.allow"));
+            } else {
+                assert_eq!(decision, PolicyDecision::Allow);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_rules_keep_first_match_priority_before_grants() {
+        use crate::core::permissions::PermissionHit;
+
+        for decision in [
+            PolicyDecision::Allow,
+            PolicyDecision::AskUser,
+            PolicyDecision::Deny,
+        ] {
+            let mut engine = engine_in(ApprovalMode::Default);
+            for (priority, decision) in [
+                (1, PolicyDecision::Deny),
+                (2, PolicyDecision::AskUser),
+                (10, decision.clone()),
+            ] {
+                engine.add_rule(PolicyRule {
+                    tool_name: Some("Write".into()),
+                    args_pattern: None,
+                    decision,
+                    priority: Some(priority),
+                    modes: None,
+                    allow_redirection: None,
+                });
+            }
+            let tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+            let result = engine.check(&tool_call, None).await;
+            assert_eq!(result.decision, decision);
+            assert_eq!(result.rule.unwrap().priority, Some(10));
+            engine.allow_tool_for_session("Write".into());
+            engine.apply_turn_tool_policy(&["Write".into()], &[]);
+            let result = engine
+                .check_with_permission_for(&tool_call, None, None, PermissionHit::SignatureSession)
+                .await;
+            assert_eq!(result.decision, decision);
+            assert_eq!(result.explicit_rule, decision != PolicyDecision::Allow);
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_classifier_uncertainty_cannot_fall_back_to_default_allow() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+
+        let mut engine = PolicyEngine::new(PolicyEngineConfig {
+            approval_mode: Some(ApprovalMode::Auto),
+            default_decision: Some(PolicyDecision::Allow),
+            ..Default::default()
+        });
+        engine.set_auto_classifier(
+            mock_classifier(vec![AutoVerdict::Ask {
+                reason: "classifier timed out".into(),
+            }]),
+            None,
+        );
+        let tool_call = call("Write", serde_json::json!({"file_path": "src/example.rs"}));
+        assert_eq!(
+            engine.check(&tool_call, None).await.decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(
+            engine
+                .recheck_local_for(&tool_call, None, None)
+                .await
+                .decision,
+            PolicyDecision::AskUser
+        );
+        assert_eq!(engine.auto_classifier_stats().total_classifications, 1);
     }
 
     /// 显式 `ask` 规则仍然压得住 auto 模式 —— 模式默认值不能吃掉"每次都问我"。

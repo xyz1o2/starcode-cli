@@ -105,6 +105,9 @@ async fn handle_palette(
 ) -> Result<bool, Err> {
     use crossterm::event::KeyCode::*;
 
+    if key.code == Enter {
+        crate::ui::services::plugin_commands::invalidate_changed_root(state);
+    }
     let query = state.palette_filter.trim().to_lowercase();
     // 下标只能解释成"画出来的顺序"：`palette_display_items` 是那一份定义，
     // `render_palette` 用它画高亮，这里用它解析 Enter。两者曾经各按各的顺序
@@ -113,6 +116,13 @@ async fn handle_palette(
     let display_items =
         crate::ui::components::palette::palette_display_items(&state.palette_mode, state, &query);
     let items_len = display_items.len();
+    if matches!(state.palette_mode, crate::ui::state::PaletteMode::Command) {
+        if key.code == Enter && state.plugin_commands.palette_selection_lost {
+            state.plugin_commands.palette_selection_lost = false;
+            return Ok(true);
+        }
+        state.plugin_commands.palette_selection_lost = false;
+    }
 
     match key.code {
         Esc => {

@@ -7,8 +7,8 @@ use crate::agent::tool_routing::{
     build_json_fallback_prompt, build_navigator_skill_tool_call, build_project_map_tool_call,
     build_repo_map_tool_call, build_tool_loop_signature, build_validation_tool_call,
     detect_tool_loop, has_action_intent, is_edit_tool_name, is_read_only_tool_name,
-    is_validation_tool_name, json_fallback_extract_tool_call, resolved_read_only_turn_limit,
-    select_best_auto_trigger, AutoTriggerKind,
+    json_fallback_extract_tool_call, resolved_read_only_turn_limit, select_best_auto_trigger,
+    AutoTriggerKind,
 };
 use crate::agent::{hooks, reflection, tool_helpers};
 use crate::core::i18n;
@@ -56,7 +56,7 @@ impl Agent {
         editor_skill_attempted: &mut bool,
         project_map_attempted: &mut bool,
         skip_verification: bool,
-        verification_required: &mut bool,
+        verification_required: &mut tool_helpers::VerificationState,
         tool_loop_repeat_threshold: usize,
         tool_signature_history: &mut VecDeque<String>,
         tool_loop_interventions: &mut usize,
@@ -442,7 +442,7 @@ impl Agent {
         tool_calls: &[StarToolCall],
         current_turn: i32,
         skip_verification: bool,
-        verification_required: &mut bool,
+        verification_required: &mut tool_helpers::VerificationState,
         consecutive_read_only_turns: &mut usize,
         file_read_tracker: &mut std::collections::HashMap<String, usize>,
         loop_state: &mut LoopState,
@@ -553,8 +553,6 @@ impl Agent {
 
         if !runnable_tool_calls.is_empty() {
             let mut successful_edit_happened = false;
-            let mut successful_edit_tools = Vec::new();
-            let mut validation_tool_happened = false;
 
             for segment in tool_execution_segments(&runnable_tool_calls) {
                 match segment {
@@ -568,6 +566,15 @@ impl Agent {
                             .tool_executor
                             .execute_batch(calls, None, self.abort_token.clone())
                             .await;
+                        let observed_calls = indices
+                            .iter()
+                            .map(|&index| runnable_tool_calls[index].clone())
+                            .collect::<Vec<_>>();
+                        verification_required.observe_batch(
+                            &observed_calls,
+                            &results,
+                            skip_verification,
+                        );
                         for (index, result) in indices.into_iter().zip(results) {
                             self.consume_tool_result(
                                 user_input,
@@ -578,8 +585,6 @@ impl Agent {
                                 verification_required,
                                 loop_state,
                                 &mut successful_edit_happened,
-                                &mut successful_edit_tools,
-                                &mut validation_tool_happened,
                             )
                             .await;
                         }
@@ -588,6 +593,11 @@ impl Agent {
                         let tool_call = &runnable_tool_calls[index];
                         self.emit_tool_starts(std::slice::from_ref(tool_call));
                         let result = self.execute_single_tool(tool_call).await;
+                        verification_required.observe_batch(
+                            std::slice::from_ref(tool_call),
+                            std::slice::from_ref(&result),
+                            skip_verification,
+                        );
                         if result.success
                             && matches!(
                                 crate::core::tools::constants::resolve_registered_tool_name(
@@ -616,19 +626,10 @@ impl Agent {
                             verification_required,
                             loop_state,
                             &mut successful_edit_happened,
-                            &mut successful_edit_tools,
-                            &mut validation_tool_happened,
                         )
                         .await;
                     }
                 }
-            }
-
-            if successful_edit_happened && !validation_tool_happened && !skip_verification {
-                messages.push(StarMessage::system(
-                    "Code edits were applied. Verification is required: run diagnostics or targeted tests before finalizing."
-                        .to_string(),
-                ));
             }
 
             // B1: Goal convergence nudge — injected ONCE per session, right
@@ -741,11 +742,9 @@ impl Agent {
         tool_call: &StarToolCall,
         result: ToolResult,
         skip_verification: bool,
-        verification_required: &mut bool,
+        verification_required: &mut tool_helpers::VerificationState,
         loop_state: &mut LoopState,
         successful_edit_happened: &mut bool,
-        successful_edit_tools: &mut Vec<String>,
-        validation_tool_happened: &mut bool,
     ) {
         self.adopt_skill_effort(tool_call, &result);
         self.emit_tool_finished(tool_call, &result);
@@ -756,18 +755,8 @@ impl Agent {
 
         if is_edit_tool_name(&tool_call.function.name) && result.success {
             *successful_edit_happened = true;
-            successful_edit_tools.push(tool_call.function.name.clone());
             self.verify_successful_edit(messages, tool_call);
         }
-        if is_validation_tool_name(&tool_call.function.name) {
-            *validation_tool_happened = true;
-        }
-        tool_helpers::update_verification_state(
-            tool_call,
-            &result,
-            verification_required,
-            skip_verification,
-        );
         hooks::run_post_tool_hooks_at(
             self.config.agent_working_dir(),
             user_input,
@@ -889,6 +878,59 @@ impl Agent {
         }
     }
 
+    /// 在下一次 provider 请求前补齐一代编辑的验证，不触碰已经发出的终稿。
+    pub(crate) async fn settle_pending_verification(
+        &mut self,
+        user_input: &str,
+        messages: &mut Vec<StarMessage>,
+        active_tools: &HashSet<String>,
+        current_turn: i32,
+        state: &mut tool_helpers::VerificationState,
+        skip_verification: bool,
+        loop_state: &mut LoopState,
+    ) {
+        if skip_verification || !state.is_pending() {
+            return;
+        }
+        if self
+            .abort_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self
+                .abort_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            state.record_attempt(tool_helpers::VerificationOutcome::Failed);
+            return;
+        }
+        if !active_tools.contains("GetDiagnostics")
+            || !crate::core::tools::diagnostics::supports_automatic_check(
+                &self.config.target_dir(),
+                state.edited_paths(),
+            )
+        {
+            state.record_attempt(tool_helpers::VerificationOutcome::Unavailable);
+            messages.push(StarMessage::system(
+                "Automatic verification was not run: no active diagnostic tool or supported checker for the edited files. Do not claim the changes passed verification.".to_string(),
+            ));
+            return;
+        }
+        // 在 hooks/权限等待前记尝试，拒绝、取消或预算不足不能开启自动重试环。
+        state.record_attempt(tool_helpers::VerificationOutcome::Failed);
+        let call = build_validation_tool_call();
+        self.run_auto_trigger_tool(
+            user_input,
+            messages,
+            call,
+            state,
+            skip_verification,
+            loop_state,
+            None,
+        )
+        .await;
+    }
+
     /// 执行通用的自动触发器——构建工具调用、推送助手消息、执行工具、推送结果
     ///
     /// `usable_flag`：可选的"这次调用真的给出了可用结果"回写槽。
@@ -901,7 +943,7 @@ impl Agent {
         user_input: &str,
         messages: &mut Vec<StarMessage>,
         tool_call: StarToolCall,
-        verification_required: &mut bool,
+        verification_required: &mut tool_helpers::VerificationState,
         skip_verification: bool,
         loop_state: &mut LoopState,
         usable_flag: Option<&mut bool>,
@@ -930,10 +972,9 @@ impl Agent {
                 if let Some(flag) = usable_flag {
                     *flag = tool_helpers::tool_result_is_usable(&result);
                 }
-                tool_helpers::update_verification_state(
-                    &tool_call,
-                    &result,
-                    verification_required,
+                verification_required.observe_batch(
+                    std::slice::from_ref(&tool_call),
+                    std::slice::from_ref(&result),
                     skip_verification,
                 );
                 hooks::run_post_tool_hooks(user_input, &tool_call, &result).await;
@@ -1014,7 +1055,7 @@ impl Agent {
         project_map_attempted: &mut bool,
         turn_active_tools: &HashSet<String>,
         skip_verification: bool,
-        verification_required: &mut bool,
+        verification_required: &mut tool_helpers::VerificationState,
         loop_state: &mut LoopState,
     ) -> TurnResult {
         // 当前可用的 skill 名单 ——
@@ -1034,7 +1075,7 @@ impl Agent {
 
         // 使用优先级驱动选择替代原串行链
         let best = select_best_auto_trigger(
-            *verification_required,
+            false,
             skip_verification,
             user_input,
             current_content,
@@ -1058,23 +1099,6 @@ impl Agent {
         ));
 
         match selected.kind {
-            AutoTriggerKind::Verification => {
-                let tool_call = build_validation_tool_call(current_turn);
-                crate::utils::logging::append_debug_log_line(&format!(
-                    "[VERIFY_AUTO] auto-trigger diagnostics (turn={})",
-                    current_turn
-                ));
-                self.run_auto_trigger_tool(
-                    user_input,
-                    messages,
-                    tool_call,
-                    verification_required,
-                    skip_verification,
-                    loop_state,
-                    None,
-                )
-                .await
-            }
             AutoTriggerKind::Explore => {
                 let tool_call = build_explore_tool_call(user_input, current_turn);
                 self.run_auto_trigger_tool(
@@ -1554,6 +1578,523 @@ fn record_tool_outcome(
 mod tests {
     use super::*;
     use crate::types::StarToolCallFunction;
+
+    #[derive(Clone)]
+    struct VerificationFakeTool {
+        name: &'static str,
+        status: &'static str,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::core::tools::tools::BaseDeclarativeTool for VerificationFakeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn display_name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "Local verification regression fixture"
+        }
+        fn kind(&self) -> crate::core::tools::tools::Kind {
+            crate::core::tools::tools::Kind::Other
+        }
+        fn parameter_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn create_invocation(
+            &self,
+            _params: serde_json::Value,
+        ) -> Result<
+            Box<dyn crate::core::tools::tools::ToolInvocation>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    impl crate::core::tools::tools::ToolInvocation for VerificationFakeTool {
+        fn get_description(&self) -> String {
+            self.name.into()
+        }
+        fn tool_locations(&self) -> Vec<crate::core::tools::tools::ToolLocation> {
+            Vec::new()
+        }
+        fn execute(
+            &self,
+            _signal: Option<&tokio_util::sync::CancellationToken>,
+            _update: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::core::tools::tools::ToolResult,
+                            Box<dyn std::error::Error>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .expect("fake call log")
+                    .push(self.name.into());
+                Ok(crate::core::tools::tools::ToolResult {
+                    output: format!("local-{}-{}", self.name, self.status),
+                    data: Some(serde_json::json!({"verification_status":self.status})),
+                    error: (self.name == "GetDiagnostics" && self.status == "failed").then(|| {
+                        crate::core::tools::tools::ToolError {
+                            error_type: "fixture_failure".into(),
+                            message: "local checker failed".into(),
+                        }
+                    }),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    type FakeCallLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    async fn verification_fixture(
+        root: &std::path::Path,
+        endpoint: String,
+        status: &'static str,
+    ) -> (
+        Agent,
+        std::sync::Arc<crate::core::confirmation_bus::MessageBus>,
+        FakeCallLog,
+    ) {
+        use crate::core::policy::{
+            types::{ApprovalMode, PolicyEngineConfig},
+            PolicyEngine,
+        };
+        let mut config = crate::core::config::Config::new(crate::core::config::ConfigParameters {
+            target_dir: root.to_path_buf(),
+            cwd: root.to_path_buf(),
+            core_tools: Some(Vec::new()),
+            mcp_enabled: Some(false),
+            enable_agents: Some(false),
+            max_session_turns: Some(4),
+            ..Default::default()
+        });
+        config
+            .initialize()
+            .await
+            .expect("initialize local fake-tool project");
+        let config = std::sync::Arc::new(config);
+        let client = crate::llm::client::StarClient::new(
+            "local-key",
+            Some("gpt-5-local".into()),
+            Some(endpoint),
+            Some(true),
+            Some("local-test".into()),
+        );
+        let bus = std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            PolicyEngine::new(PolicyEngineConfig {
+                approval_mode: Some(ApprovalMode::BypassPermissions),
+                ..Default::default()
+            }),
+            false,
+        ));
+        let registry = std::sync::Arc::new(crate::core::tools::tool_registry::ToolRegistry::new(
+            config.clone(),
+        ));
+        let calls = FakeCallLog::default();
+        for name in ["Edit", "Bash", "GetDiagnostics"] {
+            registry.register_tool(std::sync::Arc::new(VerificationFakeTool {
+                name,
+                status,
+                calls: calls.clone(),
+            }));
+        }
+        let mut agent = Agent::new(client.clone(), config.clone());
+        agent.tool_executor = std::sync::Arc::new(crate::agent::tool_executor::ToolExecutor::new(
+            client,
+            registry,
+            Some(bus.clone()),
+            config,
+        ));
+        (agent, bus, calls)
+    }
+
+    async fn apply_fake_batch(
+        agent: &mut Agent,
+        state: &mut tool_helpers::VerificationState,
+        messages: &mut Vec<StarMessage>,
+        calls: &[StarToolCall],
+        skip_verification: bool,
+        loop_state: &mut LoopState,
+    ) {
+        messages.push(StarMessage::assistant_with_tool_calls(calls.to_vec()));
+        agent
+            .execute_tool_calls_in_loop(
+                "Return the requested change.",
+                messages,
+                calls,
+                1,
+                skip_verification,
+                state,
+                &mut 0,
+                &mut std::collections::HashMap::new(),
+                loop_state,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verification_explicit_bash_in_the_edit_batch_avoids_duplicate_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let (mut agent, _, calls) =
+            verification_fixture(root.path(), "http://127.0.0.1:1/v1".into(), "passed").await;
+        let mut edit = tool_call(20, "Edit");
+        edit.function.arguments =
+            serde_json::json!({"file_path":root.path().join("lib.rs")}).to_string();
+        let mut bash = tool_call(21, "Bash");
+        bash.function.arguments = serde_json::json!({"command":"cargo check --lib"}).to_string();
+        let mut state = tool_helpers::VerificationState::default();
+        let mut messages = vec![StarMessage::user("Return the requested change.")];
+        let mut loop_state = LoopState::new(5);
+        apply_fake_batch(
+            &mut agent,
+            &mut state,
+            &mut messages,
+            &[edit, bash],
+            false,
+            &mut loop_state,
+        )
+        .await;
+        assert!(!state.is_pending());
+        agent
+            .settle_pending_verification(
+                "Return the requested change.",
+                &mut messages,
+                &HashSet::from(["GetDiagnostics".into()]),
+                2,
+                &mut state,
+                false,
+                &mut loop_state,
+            )
+            .await;
+        assert_eq!(*calls.lock().unwrap(), ["Edit", "Bash"]);
+    }
+
+    #[tokio::test]
+    async fn verification_failure_unavailable_skip_and_new_edits_do_not_retry_forever() {
+        for scenario in ["failed", "unavailable", "skip", "svg", "cancel"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+            let (mut agent, _, calls) = verification_fixture(
+                root.path(),
+                "http://127.0.0.1:1/v1".into(),
+                if scenario == "failed" {
+                    "failed"
+                } else {
+                    "passed"
+                },
+            )
+            .await;
+            let mut edit = tool_call(30, "Edit");
+            edit.function.arguments = serde_json::json!({"file_path":root.path().join(if scenario == "svg" {"logo.svg"} else {"lib.rs"})}).to_string();
+            let mut state = tool_helpers::VerificationState::default();
+            let mut messages = vec![StarMessage::user("Return the requested change.")];
+            let mut loop_state = LoopState::new(8);
+            apply_fake_batch(
+                &mut agent,
+                &mut state,
+                &mut messages,
+                &[edit.clone()],
+                scenario == "skip",
+                &mut loop_state,
+            )
+            .await;
+            if scenario == "cancel" {
+                let token = tokio_util::sync::CancellationToken::new();
+                token.cancel();
+                agent.abort_token = Some(token);
+            }
+            let active = if scenario == "unavailable" {
+                HashSet::new()
+            } else {
+                HashSet::from(["GetDiagnostics".into()])
+            };
+            for _ in 0..2 {
+                agent
+                    .settle_pending_verification(
+                        "Return the requested change.",
+                        &mut messages,
+                        &active,
+                        2,
+                        &mut state,
+                        scenario == "skip",
+                        &mut loop_state,
+                    )
+                    .await;
+            }
+            let count = calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.as_str() == "GetDiagnostics")
+                .count();
+            assert_eq!(count, usize::from(scenario == "failed"), "{scenario}");
+            if scenario != "skip" {
+                assert!(!state.is_pending(), "{scenario}");
+            }
+            if scenario == "failed" {
+                apply_fake_batch(
+                    &mut agent,
+                    &mut state,
+                    &mut messages,
+                    &[edit],
+                    false,
+                    &mut loop_state,
+                )
+                .await;
+                assert!(
+                    state.is_pending(),
+                    "a new successful edit creates fresh debt"
+                );
+                agent
+                    .settle_pending_verification(
+                        "Return the requested change.",
+                        &mut messages,
+                        &active,
+                        3,
+                        &mut state,
+                        false,
+                        &mut loop_state,
+                    )
+                    .await;
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|call| call.as_str() == "GetDiagnostics")
+                        .count(),
+                    2
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_permission_refusal_uses_the_real_executor_and_is_not_retried() {
+        use crate::core::confirmation_bus::types::{Message, ToolConfirmationResponse};
+        use crate::core::policy::{
+            types::{PolicyDecision, PolicyEngineConfig, PolicyRule},
+            PolicyEngine,
+        };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let (mut agent, _, calls) =
+            verification_fixture(root.path(), "http://127.0.0.1:1/v1".into(), "passed").await;
+        let config = agent.config.clone();
+        let registry = std::sync::Arc::new(crate::core::tools::tool_registry::ToolRegistry::new(
+            config.clone(),
+        ));
+        registry.register_tool(std::sync::Arc::new(VerificationFakeTool {
+            name: "GetDiagnostics",
+            status: "passed",
+            calls: calls.clone(),
+        }));
+        let bus = std::sync::Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            PolicyEngine::new(PolicyEngineConfig {
+                rules: Some(vec![PolicyRule {
+                    tool_name: Some("GetDiagnostics".into()),
+                    args_pattern: None,
+                    decision: PolicyDecision::AskUser,
+                    priority: Some(100),
+                    modes: None,
+                    allow_redirection: None,
+                }]),
+                ..Default::default()
+            }),
+            false,
+        ));
+        agent.tool_executor = std::sync::Arc::new(crate::agent::tool_executor::ToolExecutor::new(
+            agent.client.clone(),
+            registry,
+            Some(bus.clone()),
+            config,
+        ));
+        let mut receiver = bus.subscribe();
+        let responder = tokio::spawn(async move {
+            while let Ok(message) = receiver.recv().await {
+                if let Message::ToolConfirmationRequest(request) = message {
+                    bus.publish(Message::ToolConfirmationResponse(
+                        ToolConfirmationResponse::from_user_decision(
+                            request.correlation_id,
+                            crate::types::ToolConfirmationOutcome::Cancel,
+                            None,
+                        ),
+                    ))
+                    .await
+                    .unwrap();
+                    return;
+                }
+            }
+            panic!("expected a real executor permission request");
+        });
+        let mut edit = tool_call(40, "Edit");
+        edit.function.arguments = serde_json::json!({"file_path":"lib.rs"}).to_string();
+        let mut state = tool_helpers::VerificationState::default();
+        state.observe_batch(
+            &[edit],
+            &[ToolResult {
+                success: true,
+                output: Some("edited".into()),
+                error: None,
+                data: None,
+                llm_content: None,
+            }],
+            false,
+        );
+        let mut messages = Vec::new();
+        let mut loop_state = LoopState::new(5);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for _ in 0..2 {
+                agent
+                    .settle_pending_verification(
+                        "Return the requested change.",
+                        &mut messages,
+                        &HashSet::from(["GetDiagnostics".into()]),
+                        2,
+                        &mut state,
+                        false,
+                        &mut loop_state,
+                    )
+                    .await;
+            }
+            responder.await.unwrap();
+        })
+        .await
+        .expect("permission refusal must resolve without retrying");
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(!state.is_pending());
+        assert!(messages.iter().any(|message| message.role == "tool"));
+    }
+
+    #[tokio::test]
+    async fn verification_runs_before_the_next_local_http_request_and_emits_one_final_report() {
+        use crate::agent::messaging::AgentEvent;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let file = root.path().join("lib.rs");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let length = String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let delta = if index == 0 {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"edit-http","type":"function","function":{"name":"Edit","arguments":serde_json::json!({"file_path":file}).to_string()}}]})
+                } else {
+                    serde_json::json!({"content":"The requested change is complete. The local verification passed."})
+                };
+                let frame = serde_json::json!({"object":"chat.completion.chunk","choices":[{"index":0,"delta":delta}]});
+                let body = format!("data: {frame}\n\ndata: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let server_abort = server.abort_handle();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let (mut agent, _, calls) = verification_fixture(root.path(), endpoint, "passed").await;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            agent.event_tx = Some(tx);
+            let tools = agent.tool_executor.get_tool_definitions();
+            let names = tools
+                .iter()
+                .map(|tool| tool.function.name.clone())
+                .collect::<HashSet<_>>();
+            let selection = crate::agent::tool_routing::ToolSelection {
+                tools: tools.clone(),
+                selected_names: names.clone(),
+                rationale: "local verification regression".into(),
+                total_tools: tools.len(),
+            };
+            let mut messages = vec![StarMessage::user("Return the requested change.")];
+            let result = agent
+                .run_agentic_loop(
+                    "Return the requested change.",
+                    &mut messages,
+                    &tools,
+                    &names,
+                    "local",
+                    0,
+                    &selection,
+                )
+                .await;
+            assert!(result.is_ok(), "{result:?}");
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]["messages"]
+                .to_string()
+                .contains("local-GetDiagnostics-passed"));
+            assert_eq!(*calls.lock().unwrap(), ["Edit", "GetDiagnostics"]);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == "assistant"
+                        && message.tool_calls.is_none()
+                        && message
+                            .content
+                            .as_deref()
+                            .is_some_and(|text| text.contains("The requested change is complete.")))
+                    .count(),
+                1
+            );
+            let mut order = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    AgentEvent::ToolFinished { tool_call, .. } => {
+                        order.push(tool_call.function.name)
+                    }
+                    AgentEvent::TextDelta(text) | AgentEvent::Message(text)
+                        if text.contains("The requested change is complete.") =>
+                    {
+                        order.push("final".into())
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(order, ["Edit", "GetDiagnostics", "final"]);
+        })
+        .await;
+        server_abort.abort();
+        outcome.expect("local edit/verification/final regression must finish");
+    }
 
     struct AllowSkillCommands;
 

@@ -1,6 +1,57 @@
 //! 工具调用的审批（确认 / 拒绝 / 反馈）。
 //!
 use super::*;
+use crate::core::i18n;
+
+/// 只有请求成功送进运行时后才收起卡片，发送失败保留选择与反馈以便重试。
+async fn submit_permission_choice(
+    state: &mut ChatState,
+    agent_tx: &mpsc::Sender<AgentRequest>,
+    id: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (outcome, label) = match state.pending_confirmation_choice {
+        1 => (
+            crate::types::ToolConfirmationOutcome::ProceedOnce,
+            i18n::t1("ui.confirm.outcome.once"),
+        ),
+        2 => (
+            crate::types::ToolConfirmationOutcome::AllowSession,
+            i18n::t1("ui.confirm.outcome.session"),
+        ),
+        3 => (
+            crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
+            i18n::t1("ui.confirm.outcome.persisting"),
+        ),
+        _ => (
+            crate::types::ToolConfirmationOutcome::Cancel,
+            i18n::t1("ui.confirm.option.deny"),
+        ),
+    };
+    let feedback = (!state.pending_confirmation_feedback.is_empty())
+        .then(|| state.pending_confirmation_feedback.clone());
+    agent_tx
+        .send(AgentRequest::ConfirmTool {
+            tool_call_id: id,
+            outcome,
+            feedback,
+        })
+        .await?;
+    if let Some(idx) = state.pending_confirmation_entry_idx {
+        if let Some(confirmation) = state
+            .chat_history
+            .get_mut(idx)
+            .and_then(|entry| entry.confirmation.as_mut())
+        {
+            confirmation.outcome = Some(label);
+        }
+        state.rendered_cache.remove(&idx);
+        state.virtual_list.mark_dirty(idx);
+    }
+    state.show_permission_explanation = false;
+    state.show_permission_debug = false;
+    state.clear_pending_confirmation();
+    Ok(())
+}
 
 /// 工具审批（AskUserQuestion / 权限确认）与权限说明、权限调试面板。
 ///
@@ -59,47 +110,7 @@ pub(super) async fn handle_tool_approval(
                         }
                     }
                     KeyCode::Enter => {
-                        // Submit with current choice + feedback
-                        let outcome = match state.pending_confirmation_choice {
-                            1 => crate::types::ToolConfirmationOutcome::ProceedOnce,
-                            2 => crate::types::ToolConfirmationOutcome::AllowSession,
-                            3 => crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
-                            _ => crate::types::ToolConfirmationOutcome::Cancel,
-                        };
-                        let feedback = if state.pending_confirmation_feedback.is_empty() {
-                            None
-                        } else {
-                            Some(state.pending_confirmation_feedback.clone())
-                        };
-                        if let Some(idx) = state.pending_confirmation_entry_idx {
-                            if let Some(entry) = state.chat_history.get_mut(idx) {
-                                if let Some(conf) = entry.confirmation.as_mut() {
-                                    let outcome_str = match state.pending_confirmation_choice {
-                                        1 => "Allowed (once)",
-                                        2 => "Allowed (session)",
-                                        3 => "Allowed (always)",
-                                        _ => "Denied",
-                                    };
-                                    if let Some(ref fb) = feedback {
-                                        conf.outcome =
-                                            Some(format!("{} with feedback: {}", outcome_str, fb));
-                                    } else {
-                                        conf.outcome = Some(outcome_str.to_string());
-                                    }
-                                }
-                            }
-                            state.rendered_cache.remove(&idx);
-                        }
-                        let _ = agent_tx
-                            .send(AgentRequest::ConfirmTool {
-                                tool_call_id: id,
-                                outcome,
-                                feedback,
-                            })
-                            .await;
-                        state.show_permission_explanation = false;
-                        state.show_permission_debug = false;
-                        state.clear_pending_confirmation();
+                        submit_permission_choice(state, agent_tx, id).await?;
                     }
                     KeyCode::Char(ch)
                         if !key
@@ -170,21 +181,7 @@ pub(super) async fn handle_tool_approval(
                     }
                     KeyCode::Esc => {
                         state.pending_confirmation_choice = 4;
-                        let _ = agent_tx
-                            .send(AgentRequest::ConfirmTool {
-                                tool_call_id: id,
-                                outcome: crate::types::ToolConfirmationOutcome::Cancel,
-                                feedback: None,
-                            })
-                            .await;
-                        // 先取索引再清状态：`clear_pending_confirmation` 会把
-                        // `pending_confirmation_entry_idx` 置空，卡片上的 "Denied"
-                        // 就没机会作废重绘了。
-                        let rendered_idx = state.pending_confirmation_entry_idx;
-                        state.clear_pending_confirmation();
-                        if let Some(idx) = rendered_idx {
-                            state.rendered_cache.remove(&idx);
-                        }
+                        submit_permission_choice(state, agent_tx, id).await?;
                     }
                     KeyCode::Up => {
                         if state.pending_confirmation_choice > 1 {
@@ -203,42 +200,7 @@ pub(super) async fn handle_tool_approval(
                         }
                     }
                     KeyCode::Enter => {
-                        let outcome = match state.pending_confirmation_choice {
-                            1 => crate::types::ToolConfirmationOutcome::ProceedOnce,
-                            2 => crate::types::ToolConfirmationOutcome::AllowSession,
-                            3 => crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
-                            _ => crate::types::ToolConfirmationOutcome::Cancel,
-                        };
-                        if let Some(idx) = state.pending_confirmation_entry_idx {
-                            if let Some(entry) = state.chat_history.get_mut(idx) {
-                                if let Some(conf) = entry.confirmation.as_mut() {
-                                    let outcome_str = match state.pending_confirmation_choice {
-                                        1 => "Allowed (once)",
-                                        2 => "Allowed (session)",
-                                        3 => "Allowed (always)",
-                                        _ => "Denied",
-                                    };
-                                    conf.outcome = Some(outcome_str.to_string());
-                                }
-                            }
-                            state.rendered_cache.remove(&idx);
-                        }
-                        // Collect feedback if user typed any
-                        let feedback = if state.pending_confirmation_feedback.is_empty() {
-                            None
-                        } else {
-                            Some(state.pending_confirmation_feedback.clone())
-                        };
-                        let _ = agent_tx
-                            .send(AgentRequest::ConfirmTool {
-                                tool_call_id: id,
-                                outcome,
-                                feedback,
-                            })
-                            .await;
-                        state.show_permission_explanation = false;
-                        state.show_permission_debug = false;
-                        state.clear_pending_confirmation();
+                        submit_permission_choice(state, agent_tx, id).await?;
                     }
                     _ => {}
                 }
@@ -350,6 +312,194 @@ pub(crate) fn handle_task_panel_key(state: &mut ChatState, key: KeyEvent) -> boo
     }
 
     false
+}
+
+#[cfg(test)]
+mod approval_regressions {
+    use super::*;
+    use crate::runtime::messages::StreamMessage;
+    use crate::ui::services::stream::handle_stream_update;
+
+    fn request(id: &str) -> StreamMessage {
+        StreamMessage::ToolConfirmationRequest {
+            message_id: 7,
+            tool_call_id: format!("corr-{id}"),
+            originating_tool_call_id: Some(format!("call-{id}")),
+            confirmation: crate::types::ToolConfirmation {
+                tool_name: "Bash".into(),
+                operation_type: crate::types::ConfirmationType::Generic,
+                details: crate::types::ConfirmationDetails::Generic {
+                    title: format!("Request {id}"),
+                    prompt: format!("Approve {id}?"),
+                },
+                is_dangerous: false,
+                outcome: None,
+                reason: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_approval_submission_preserves_the_card_and_feedback() {
+        let mut state = ChatState::test_fixture();
+        let (tx, rx) = mpsc::channel(1);
+        handle_stream_update(&mut state, request("a"), &tx)
+            .await
+            .unwrap();
+        state.pending_confirmation_choice = 3;
+        state.pending_confirmation_feedback = "keep this".to_string();
+        state.confirmation_feedback_mode = true;
+        drop(rx);
+        assert!(handle_tool_approval(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx
+        )
+        .await
+        .is_err());
+        assert!(state.is_awaiting_confirmation);
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-a"));
+        assert_eq!(state.pending_confirmation_choice, 3);
+        assert_eq!(state.pending_confirmation_feedback, "keep this");
+        assert!(
+            state.chat_history[state.pending_confirmation_entry_idx.unwrap()]
+                .confirmation
+                .as_ref()
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn arrow_selection_submits_the_requested_permission_scope() {
+        for (downs, expected) in [
+            (1, crate::types::ToolConfirmationOutcome::AllowSession),
+            (
+                2,
+                crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave,
+            ),
+        ] {
+            let mut state = ChatState::test_fixture();
+            let (tx, mut rx) = mpsc::channel(4);
+            handle_stream_update(&mut state, request("a"), &tx)
+                .await
+                .unwrap();
+            for _ in 0..downs {
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(rx.try_recv().is_err());
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            let AgentRequest::ConfirmTool {
+                tool_call_id,
+                outcome,
+                ..
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("expected approval");
+            };
+            assert_eq!(tool_call_id, "corr-a");
+            assert_eq!(outcome, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_requests_preserve_the_selected_scope_and_feedback() {
+        for choice in [2, 3] {
+            let mut state = ChatState::test_fixture();
+            let (tx, mut rx) = mpsc::channel(8);
+            handle_stream_update(&mut state, request("a"), &tx)
+                .await
+                .expect("first request");
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(
+                    KeyCode::Char(char::from_digit(choice, 10).expect("choice digit")),
+                    KeyModifiers::NONE,
+                ),
+                &tx,
+                None,
+            )
+            .await
+            .expect("select scope");
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("feedback mode");
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("feedback input");
+            handle_stream_update(&mut state, request("b"), &tx)
+                .await
+                .expect("second request");
+            handle_stream_update(&mut state, request("c"), &tx)
+                .await
+                .expect("third request");
+            assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-a"));
+            assert_eq!(
+                state.pending_confirmation_originating_id.as_deref(),
+                Some("call-a")
+            );
+            assert_eq!(state.pending_confirmation_choice, choice as usize);
+            assert!(state.confirmation_feedback_mode);
+            assert_eq!(state.pending_confirmation_feedback, "x");
+            assert!(
+                rx.try_recv().is_err(),
+                "selection must not approve anything"
+            );
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("submit original request");
+            let expected = if choice == 2 {
+                crate::types::ToolConfirmationOutcome::AllowSession
+            } else {
+                crate::types::ToolConfirmationOutcome::ProceedAlwaysAndSave
+            };
+            match rx.try_recv().expect("approval sent") {
+                AgentRequest::ConfirmTool {
+                    tool_call_id,
+                    outcome,
+                    feedback,
+                } => {
+                    assert_eq!(tool_call_id, "corr-a");
+                    assert_eq!(outcome, expected);
+                    assert_eq!(feedback.as_deref(), Some("x"));
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+            assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-b"));
+            state.clear_pending_confirmation();
+            assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-c"));
+        }
+    }
 }
 
 /// 通用输入对话框（API Key / Base URL / 重命名）与 provider 多字段表单。

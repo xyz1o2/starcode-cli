@@ -95,18 +95,151 @@ pub(crate) fn execute_single_tool_with_progress<'a>(
     (progress_rx, future)
 }
 
-pub(crate) fn update_verification_state(
-    tool_call: &StarToolCall,
-    result: &ToolResult,
-    verification_required: &mut bool,
-    skip_verification: bool,
-) {
-    if is_edit_tool_name(&tool_call.function.name) && result.success && !skip_verification {
-        *verification_required = true;
+/// 每代编辑最多补验一次；失败、拒绝和不可用不等同于验证通过。
+#[derive(Debug, Default)]
+pub(crate) struct VerificationState {
+    edit_generation: u64,
+    attempted_generation: u64,
+    outcome: Option<VerificationOutcome>,
+    edited_paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationOutcome {
+    Passed,
+    Issues,
+    Failed,
+    Unavailable,
+}
+
+impl VerificationState {
+    pub(crate) fn is_pending(&self) -> bool {
+        self.edit_generation > self.attempted_generation
     }
-    if is_validation_tool_name(&tool_call.function.name) {
-        *verification_required = false;
+
+    pub(crate) fn edited_paths(&self) -> &[std::path::PathBuf] {
+        &self.edited_paths
     }
+
+    pub(crate) fn record_attempt(&mut self, outcome: VerificationOutcome) {
+        self.attempted_generation = self.edit_generation;
+        self.outcome = Some(outcome);
+    }
+
+    /// 同一并发段的检查可能先于编辑完成，不能用结果返回顺序证明覆盖关系。
+    pub(crate) fn observe_batch(
+        &mut self,
+        calls: &[StarToolCall],
+        results: &[ToolResult],
+        skip_verification: bool,
+    ) {
+        if skip_verification {
+            return;
+        }
+        let mut edited = false;
+        for (call, result) in calls.iter().zip(results) {
+            if !is_edit_tool_name(&call.function.name) || !result.success {
+                continue;
+            }
+            edited = true;
+            if !self.is_pending() {
+                self.edited_paths.clear();
+            }
+            self.edit_generation += 1;
+            self.outcome = None;
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
+                collect_edit_paths(&args, &mut self.edited_paths);
+            }
+        }
+        if edited || self.edit_generation == 0 {
+            return;
+        }
+        for (call, result) in calls.iter().zip(results) {
+            if is_validation_tool_name(&call.function.name) {
+                let status = result
+                    .data
+                    .as_ref()
+                    .and_then(|v| v.get("verification_status"))
+                    .and_then(|v| v.as_str());
+                let outcome = match status {
+                    Some("passed") if result.success => VerificationOutcome::Passed,
+                    Some("issues") if result.success => VerificationOutcome::Issues,
+                    Some("unavailable") => VerificationOutcome::Unavailable,
+                    _ if call.function.name == "RunTests" && result.success => {
+                        match result
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("status"))
+                            .and_then(|status| status.as_str())
+                        {
+                            Some("passed") => VerificationOutcome::Passed,
+                            Some("failed") => VerificationOutcome::Issues,
+                            _ => VerificationOutcome::Failed,
+                        }
+                    }
+                    _ => VerificationOutcome::Failed,
+                };
+                self.record_attempt(outcome);
+            } else if explicit_cargo_verification(call, result) {
+                self.record_attempt(VerificationOutcome::Passed);
+            }
+        }
+    }
+}
+
+fn collect_edit_paths(args: &serde_json::Value, paths: &mut Vec<std::path::PathBuf>) {
+    for key in ["file_path", "filePath", "path", "filename", "file"] {
+        if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
+            let path = std::path::PathBuf::from(path);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+            break;
+        }
+    }
+    if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+        for edit in edits {
+            collect_edit_paths(edit, paths);
+        }
+    }
+}
+
+/// 只接受无 shell 组合的前台 cargo check/test；成功启动后台任务不是验证完成。
+fn explicit_cargo_verification(call: &StarToolCall, result: &ToolResult) -> bool {
+    if call.function.name != "Bash"
+        || !result.success
+        || result.error.is_some()
+        || result
+            .data
+            .as_ref()
+            .is_some_and(|v| v.get("task_id").is_some())
+    {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.function.arguments) else {
+        return false;
+    };
+    if args.get("dir_path").is_some()
+        || args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return false;
+    }
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if command.contains([
+        ';', '|', '&', '\n', '\r', '`', '$', '<', '>', '(', ')', '\\', '\'', '"',
+    ]) {
+        return false;
+    }
+    let words: Vec<_> = command.split_whitespace().collect();
+    matches!(words.as_slice(), ["cargo", "check" | "test", ..])
+        && !words.iter().any(|word| {
+            matches!(
+                *word,
+                "--no-run" | "--help" | "-h" | "--list" | "--version" | "-V" | "--manifest-path"
+            ) || word.starts_with("--manifest-path=")
+        })
 }
 
 /// 模型偶尔会把伪工具调用标签吐进 reasoning 流，这些标记不该出现在思考块里。
@@ -281,6 +414,76 @@ fn may_start_tag_line(prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(name: &str, arguments: serde_json::Value) -> StarToolCall {
+        StarToolCall {
+            id: name.into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: name.into(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn verification_debt_is_per_edit_generation_and_failed_attempts_do_not_retry() {
+        let edit = call("Edit", serde_json::json!({"file_path":"src/lib.rs"}));
+        let check = call("GetDiagnostics", serde_json::json!({}));
+        let mut state = VerificationState::default();
+        state.observe_batch(&[edit.clone()], &[result(true, "edited")], false);
+        assert!(state.is_pending());
+        state.observe_batch(&[check], &[result(false, "checker failed")], false);
+        assert!(!state.is_pending());
+        assert_eq!(state.outcome, Some(VerificationOutcome::Failed));
+        state.observe_batch(&[edit], &[result(true, "edited again")], false);
+        assert!(state.is_pending());
+        assert_eq!(state.edit_generation, 2);
+    }
+
+    #[test]
+    fn concurrent_edit_and_check_leave_debt_regardless_of_result_order() {
+        let edit = call("Edit", serde_json::json!({"file_path":"src/lib.rs"}));
+        let check = call("Bash", serde_json::json!({"command":"cargo check --lib"}));
+        for calls in [vec![edit.clone(), check.clone()], vec![check, edit]] {
+            let mut state = VerificationState::default();
+            state.observe_batch(&calls, &[result(true, "ok"), result(true, "ok")], false);
+            assert!(
+                state.is_pending(),
+                "concurrent checks cannot verify the final edit"
+            );
+        }
+    }
+
+    #[test]
+    fn only_explicit_completed_cargo_checks_count_as_bash_verification() {
+        let edit = call("Edit", serde_json::json!({"file_path":"src/lib.rs"}));
+        for (command, expected) in [
+            ("cargo check --workspace --all-targets --locked", true),
+            ("cargo test --lib -- --test-threads=1", true),
+            ("echo cargo test", false),
+            ("cargo test || true", false),
+            ("cargo test &", false),
+            ("cargo check; echo ok", false),
+            ("printf test", false),
+            ("cargo test --no-run", false),
+        ] {
+            let mut state = VerificationState::default();
+            state.observe_batch(&[edit.clone()], &[result(true, "edited")], false);
+            state.observe_batch(
+                &[call("Bash", serde_json::json!({"command":command}))],
+                &[result(true, "ok")],
+                false,
+            );
+            assert_eq!(!state.is_pending(), expected, "{command}");
+        }
+        let mut state = VerificationState::default();
+        state.observe_batch(&[edit], &[result(true, "edited")], true);
+        assert!(
+            !state.is_pending(),
+            "skip_verification must not create debt"
+        );
+    }
 
     /// 模拟流式：逐片喂入并拼接输出，最后 flush。
     fn sanitize_stream(chunks: &[&str]) -> String {

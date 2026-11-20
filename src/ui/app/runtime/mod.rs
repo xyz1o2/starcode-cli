@@ -462,6 +462,10 @@ pub async fn run_ui_loop(
             }
         }
 
+        if crate::ui::services::plugin_commands::poll(state) {
+            needs_redraw = true;
+        }
+
         // Local Quick Open searches never await the modal key handler. Drain their
         // completions here so a slow `fd` walk cannot hold up terminal input.
         let quick_open_active = matches!(state.top_modal(), Some(Modal::QuickOpen));

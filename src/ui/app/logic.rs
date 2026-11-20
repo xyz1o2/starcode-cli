@@ -418,6 +418,26 @@ pub async fn enqueue_user_message(
     .await
 }
 
+/// 保留内置命令优先级，未命中时将命令名与实参交给插件回退分发。
+fn parse_submitted_slash_command(input: &str) -> Option<(String, Vec<String>)> {
+    if let Some(parsed) = crate::commands::system::parse_command(input) {
+        let args = crate::commands::system::parsed_command_args(&parsed);
+        return Some((parsed.path[0].clone(), args));
+    }
+
+    let without_slash = input.trim().strip_prefix('/')?.trim();
+    let name_end = without_slash
+        .find(char::is_whitespace)
+        .unwrap_or(without_slash.len());
+    let name = &without_slash[..name_end];
+    if name.is_empty() {
+        return None;
+    }
+    // 直接解析原始尾部；重新拼接单词会丢失引号内的连续空白。
+    let args = crate::commands::system::split_command_args(&without_slash[name_end..]);
+    Some((name.to_string(), args))
+}
+
 pub async fn enqueue_user_input(
     state: &mut ChatState,
     input: crate::types::UserInput,
@@ -532,21 +552,9 @@ pub async fn enqueue_user_input(
 
     // Check for slash command
     if commands_allowed && user_input.trim().starts_with('/') {
-        let (command_name, args_vec) =
-            if let Some(parsed) = crate::commands::system::parse_command(&user_input) {
-                let args_vec = crate::commands::system::parsed_command_args(&parsed);
-                (parsed.path[0].clone(), args_vec)
-            } else {
-                let without_slash = user_input.trim()[1..].trim();
-                let parts = without_slash
-                    .split_whitespace()
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>();
-                if parts.is_empty() {
-                    return Ok(());
-                }
-                (parts[0].clone(), parts[1..].to_vec())
-            };
+        let Some((command_name, args_vec)) = parse_submitted_slash_command(&user_input) else {
+            return Ok(());
+        };
 
         // Show the command in history as user message
         state.chat_history.push(ChatEntry::user(user_input.clone()));
@@ -934,7 +942,7 @@ mod no_model_guard_tests {
     /// 面板已经开着、且上一条就是这条提示时，必须安静下来：不开第二次、不推第二条。
     #[tokio::test]
     async fn the_no_model_guard_does_not_repeat_itself() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = crate::ui::state::ChatState::test_fixture();
         state.current_provider_id = Some("apinex".to_string());
         state.current_model = String::new();
         state.last_turn_failed = true;
@@ -976,7 +984,7 @@ mod no_model_guard_tests {
     /// 选了模型时不受影响 —— 保护只针对"必然失败"这一种情况。
     #[tokio::test]
     async fn the_no_model_guard_does_not_fire_when_a_model_is_selected() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = crate::ui::state::ChatState::test_fixture();
         state.current_provider_id = Some("apinex".to_string());
         state.current_model = "free/deepseek-v4.1-flash".to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -1476,7 +1484,83 @@ mod steering_tests {
 
 #[cfg(test)]
 mod local_command_tests {
-    use super::truncate_local_command_output;
+    use super::{parse_submitted_slash_command, truncate_local_command_output};
+
+    #[test]
+    fn plugin_slash_arguments_preserve_quoted_and_empty_values() {
+        assert_eq!(
+            parse_submitted_slash_command(r#"/fixture-check --path "a b" """#),
+            Some((
+                "fixture-check".to_string(),
+                vec!["--path".to_string(), "a b".to_string(), String::new()],
+            ))
+        );
+    }
+
+    #[test]
+    fn plugin_slash_arguments_keep_original_spacing_and_literals() {
+        for (input, expected) in [
+            (
+                r#"/fixture-check "two  words" 'single quoted'"#,
+                vec!["two  words", "single quoted"],
+            ),
+            (
+                r#" /fixture-check   C:\work\file.rs  don't 用户的路径 "#,
+                vec![r"C:\work\file.rs", "don't", "用户的路径"],
+            ),
+            ("/fixture-check\t\"a\tb\"\n''", vec!["a\tb", ""]),
+            (
+                r#"/fixture-check output="two words" "unclosed"#,
+                vec!["output=two words", "\"unclosed"],
+            ),
+        ] {
+            let (name, args) = parse_submitted_slash_command(input).expect("非空插件命令");
+            assert_eq!(name, "fixture-check", "{input:?}");
+            assert_eq!(args, expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn slash_submission_preserves_command_names_and_empty_input() {
+        for input in ["", " / \t", "plain text"] {
+            assert_eq!(parse_submitted_slash_command(input), None, "{input:?}");
+        }
+        for input in ["/fixture-check", "  /fixture-check \t", "/ fixture-check"] {
+            assert_eq!(
+                parse_submitted_slash_command(input),
+                Some(("fixture-check".to_string(), Vec::new())),
+                "{input:?}"
+            );
+        }
+        assert_eq!(
+            parse_submitted_slash_command(r#"/fixture-"check --path "a b""#),
+            Some((
+                "fixture-\"check".to_string(),
+                vec!["--path".to_string(), "a b".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn slash_submission_keeps_builtin_alias_subcommand_and_prefix_resolution() {
+        for input in [
+            r#"/memory add "fact  with  spaces" """#,
+            "/?",
+            "/resum sample-session",
+            "/plugin commands fixture",
+        ] {
+            let parsed =
+                crate::commands::system::parse_command(input).expect("现有内置命令解析应命中");
+            assert_eq!(
+                parse_submitted_slash_command(input),
+                Some((
+                    parsed.path[0].clone(),
+                    crate::commands::system::parsed_command_args(&parsed)
+                )),
+                "{input:?}"
+            );
+        }
+    }
 
     #[test]
     fn short_output_passes_through_untouched() {

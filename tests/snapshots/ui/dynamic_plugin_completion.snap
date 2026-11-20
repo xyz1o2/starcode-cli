@@ -1,0 +1,9 @@
+─── 64x5 ───
+  0│                                                                │
+  1│ ▶ /fixture-check  Inspect local fixture metadata               │
+  2│                                                                │
+  3│                                                                │
+  4│                                                                │
+
+─── styles ───
+  1│0-2 fg:cyan,bg:rgb(38,79,120) · 3-18 bold,fg:white,bg:rgb(38,79,120) · 19-48 fg:gray,bg:rgb(38,79,120) · 49-63 bg:rgb(38,79,120)│

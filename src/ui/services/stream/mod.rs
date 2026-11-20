@@ -652,6 +652,14 @@ pub async fn handle_stream_update(
             message_id,
             content,
         } => {
+            if state
+                .active_message_id
+                .is_some_and(|active| active != message_id)
+                || state.complete_task_message_ids.contains(&message_id)
+                || state.last_turn_failed
+            {
+                return Ok(());
+            }
             let content = sanitize_for_tui(&content);
             // Providers may emit an empty reasoning delta as a heartbeat or
             // transition marker. It is not a visible thought and must not
@@ -660,6 +668,10 @@ pub async fn handle_stream_update(
                 return Ok(());
             }
             state.last_token_time = Some(std::time::Instant::now());
+            if !state.is_awaiting_confirmation {
+                clear_stale_retry_status(state);
+                state.model_wait_started_at = None;
+            }
             if let Some(&idx0) = state.stream_targets.get(&message_id) {
                 let mut idx = idx0;
                 if idx < state.chat_history.len() {
@@ -794,8 +806,31 @@ pub async fn handle_stream_update(
             event,
             payload,
         } => {
+            let is_model_phase = matches!(
+                event.as_str(),
+                "model_request_preparing"
+                    | "model_request_started"
+                    | "provider_request_started"
+                    | "provider_response_headers"
+                    | "provider_first_byte"
+                    | "model_first_chunk"
+                    | "agent_status"
+            );
+            // 旧回合和低优先级阶段仍留痕，但不能覆盖当前审批或终结性错误。
+            if is_model_phase
+                && (state
+                    .active_message_id
+                    .is_some_and(|active| active != message_id)
+                    || state.complete_task_message_ids.contains(&message_id)
+                    || state.is_awaiting_confirmation
+                    || state.last_turn_failed)
+            {
+                append_transcript_event(state, &event, Some(message_id), payload);
+                return Ok(());
+            }
             match event.as_str() {
                 "model_request_preparing" => {
+                    state.model_wait_started_at = None;
                     emit_status_text(state, message_id, &i18n::t1("ui.status.model_prepare"));
                 }
                 "model_request_started" => {
@@ -846,28 +881,41 @@ pub async fn handle_stream_update(
                 }
                 "model_first_chunk" => {
                     state.model_wait_started_at = None;
-                    let elapsed_ms = payload
-                        .get("elapsed_ms")
-                        .and_then(|value| value.as_u64())
-                        .unwrap_or(0);
-                    let status = if elapsed_ms > 0 {
-                        i18n::t1("ui.status.model_ready").replace("{ms}", &elapsed_ms.to_string())
-                    } else {
-                        i18n::t1("ui.status.model_ready_no_ms")
-                    };
-                    emit_status_text(state, message_id, &status);
+                    clear_stale_retry_status(state);
+                    // 双通道可能晚送首片段通知，只清模型阶段，不抹掉已开始的工具或错误。
+                    let model_statuses = [
+                        i18n::t1("ui.status.model_prepare"),
+                        i18n::t1("ui.status.model_wait"),
+                        i18n::t1("ui.status.model_wait_no_ms"),
+                        i18n::t1("ui.status.provider_send"),
+                        i18n::t1("ui.status.provider_headers"),
+                        i18n::t1("ui.status.provider_headers_no_ms"),
+                        i18n::t1("ui.status.provider_first_byte"),
+                        i18n::t1("ui.status.provider_first_byte_no_ms"),
+                        i18n::t1("ui.status.model_ready"),
+                        i18n::t1("ui.status.model_ready_no_ms"),
+                    ];
+                    if state.current_status_line.as_deref().is_some_and(|status| {
+                        model_statuses.iter().any(|template| {
+                            let prefix = template.split('{').next().unwrap_or(template).trim();
+                            !prefix.is_empty() && status.starts_with(prefix)
+                        })
+                    }) {
+                        state.current_status_line = None;
+                    }
                 }
                 "agent_status" => {
                     // Keep the STALL watchdog alive during agent_status events
                     // (e.g. rate-limit cooldown). Without this the watchdog
                     // clears is_processing after 30s even though the agent
                     // is still working.
-                    state.last_token_time = Some(std::time::Instant::now());
                     let msg = payload
                         .get("message")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .unwrap_or("")
+                        .trim();
                     if !msg.is_empty() {
+                        state.last_token_time = Some(std::time::Instant::now());
                         let status = i18n::t1("ui.status.agent").replace("{msg}", msg);
                         emit_status_text(state, message_id, &status);
                     }
@@ -1381,6 +1429,32 @@ pub async fn handle_stream_update(
         StreamMessage::RuntimeSettingsPersistenceCompleted { ui_revision, error } => {
             apply_runtime_settings_persistence(state, ui_revision, error);
         }
+        StreamMessage::ToolApprovalRecorded {
+            correlation_id,
+            originating_tool_call_id: _,
+            persisted,
+            requested_persist,
+            error,
+        } => {
+            if let Some(idx) = state.chat_history.iter().position(|entry| {
+                entry.confirmation_correlation_id.as_deref() == Some(correlation_id.as_str())
+            }) {
+                if let Some(confirmation) = state.chat_history[idx].confirmation.as_mut() {
+                    if requested_persist {
+                        confirmation.outcome = Some(if persisted {
+                            i18n::t1("ui.confirm.outcome.persisted")
+                        } else {
+                            i18n::t1("ui.confirm.outcome.persist_failed").replace(
+                                "{error}",
+                                error.as_deref().unwrap_or("unknown persistence error"),
+                            )
+                        });
+                    }
+                }
+                state.rendered_cache.remove(&idx);
+                state.virtual_list.mark_dirty(idx);
+            }
+        }
         StreamMessage::ApprovalModeChanged { mode } => {
             state.approval_mode = mode.clone();
             let mode_name = match mode {
@@ -1420,64 +1494,34 @@ pub async fn handle_stream_update(
                 confirmation.operation_type,
                 crate::types::ConfirmationType::AskUserQuestion
             );
-            // 已经有一张没人回答的卡时，**不许把它的内容换成新的请求**。
-            //
-            // 换掉之后卡片上写的是新命令、等着回答的却是新 id，而用户是照着刚
-            // 读到的那条命令按的 1 —— 于是"允许"落到一条他没看过的命令上。
-            // 门控拦不住的不是命令，是"用户批准的那一条"和"实际执行的那一条"
-            // 之间的对应关系。
-            //
-            // 但旧的请求**不能丢**：并发工具（`join_all`）可能同时发出多张卡，
-            // 每张背后都有一个正在等待答复的门禁。以前把旧卡标成 superseded 就
-            // 不管了，于是那几条调用永远等下去 —— 整轮卡死在 "Canoodling..."。
-            // 现在把旧卡放进队列，新的这张先问；回答完再一张张接上。
-            if awaiting && state.is_awaiting_confirmation {
-                if let Some(idx) = state.pending_confirmation_entry_idx {
-                    if idx < state.chat_history.len()
-                        && state.chat_history[idx].entry_type == ChatEntryType::ToolConfirmation
-                    {
-                        let active_is_ask = state.chat_history[idx]
-                            .confirmation
-                            .as_ref()
-                            .map(|c| {
-                                matches!(
-                                    c.operation_type,
-                                    crate::types::ConfirmationType::AskUserQuestion
-                                )
-                            })
-                            .unwrap_or(false);
-                        if let Some(entry) = state.chat_history[idx].confirmation.as_mut() {
-                            if entry.outcome.is_none() {
-                                entry.outcome = Some(i18n::t1("ui.confirm.queued"));
-                            }
-                        }
-                        state.chat_history[idx].is_streaming = Some(false);
-                        state.rendered_cache.remove(&idx);
-                        state.virtual_list.mark_dirty(idx);
-                        if let Some(tool_call_id) = state.pending_tool_call_id.clone() {
-                            state
-                                .pending_confirmation_queue
-                                .push_front(QueuedConfirmation {
-                                    entry_idx: idx,
-                                    message_id: state.pending_message_id.unwrap_or(message_id),
-                                    tool_call_id,
-                                    originating_tool_call_id: state
-                                        .pending_confirmation_originating_id
-                                        .clone(),
-                                    is_ask: active_is_ask,
-                                });
-                        }
-                    }
+            // 并发确认按 FIFO 排队。保留当前用户正在查看和编辑的卡片，
+            // 否则新请求会重置选择/反馈，使 2/3 看起来像是没有生效。
+            let has_active_confirmation = awaiting && state.is_awaiting_confirmation;
+            let idx = state.chat_history.len();
+            let mut entry = ChatEntry::new(ChatEntryType::ToolConfirmation, String::new())
+                .with_confirmation(confirmation)
+                .with_streaming(false);
+            entry.confirmation_correlation_id = Some(tool_call_id.clone());
+            if has_active_confirmation {
+                if let Some(pending) = entry.confirmation.as_mut() {
+                    pending.outcome = Some(i18n::t1("ui.confirm.queued"));
                 }
             }
-            let idx = state.chat_history.len();
-            state.chat_history.push(
-                ChatEntry::new(ChatEntryType::ToolConfirmation, String::new())
-                    .with_confirmation(confirmation)
-                    .with_streaming(false),
-            );
-            // New status update
-            if awaiting {
+            state.chat_history.push(entry);
+            if has_active_confirmation {
+                state.auto_follow = false;
+                state
+                    .pending_confirmation_queue
+                    .push_back(QueuedConfirmation {
+                        entry_idx: idx,
+                        message_id,
+                        tool_call_id,
+                        originating_tool_call_id,
+                        is_ask,
+                    });
+                state.rendered_cache.remove(&idx);
+                state.virtual_list.mark_dirty(idx);
+            } else if awaiting {
                 // 确认卡在主历史中，先退出代理详情，避免不可见的卡片接收确认键。
                 state.exit_teammate_view();
                 state.bg_agent_selection = None;
@@ -1503,8 +1547,10 @@ pub async fn handle_stream_update(
                 state.pending_confirmation_choice = 0;
             }
 
-            // Auto-scroll to bottom to display confirmation card
-            state.chat_list_state.select(Some(idx));
+            // 仅 active 卡接收焦点，排队请求不能抢走用户正在阅读的视口。
+            if !has_active_confirmation {
+                state.chat_list_state.select(Some(idx));
+            }
             if state.auto_follow {
                 // Force scroll to bottom calculation in next render
             }

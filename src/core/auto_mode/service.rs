@@ -120,6 +120,11 @@ pub trait AutoModeClassifier: Send + Sync + std::fmt::Debug {
     fn is_available(&self) -> bool {
         true
     }
+
+    /// 不发请求时仍能解释为何退回人工审批。
+    fn unavailable_reason(&self) -> &'static str {
+        "AI classifier is unavailable — asking the user instead"
+    }
 }
 
 /// 基于 LLM 的分类器。
@@ -325,9 +330,12 @@ impl AutoModeClassifier for LlmAutoModeClassifier {
 
         let call = async {
             let messages = vec![StarMessage::system(system), StarMessage::user(user)];
+            let options = crate::llm::LlmRequestOptions {
+                thinking_effort: Some(crate::types::ThinkingEffort::Off),
+            };
             let response = self
                 .client
-                .chat(messages, None, self.model.clone(), None)
+                .chat_with_options(messages, None, self.model.clone(), None, &options)
                 .await?;
             let content = response
                 .choices
@@ -524,6 +532,14 @@ impl AutoModeClassifier for CircuitBreakingClassifier {
 
     fn is_available(&self) -> bool {
         self.inner.is_available() && !self.is_tripped()
+    }
+
+    fn unavailable_reason(&self) -> &'static str {
+        if self.is_tripped() {
+            "AI classifier circuit breaker is open — asking the user instead"
+        } else {
+            self.inner.unavailable_reason()
+        }
     }
 }
 
@@ -830,5 +846,183 @@ mod tests {
         let classifier = mock_classifier(vec![]);
         let verdict = classifier.classify(&request()).await;
         assert!(matches!(verdict, AutoVerdict::Ask { .. }));
+    }
+
+    type RecordedEfforts = Arc<std::sync::Mutex<Vec<Option<crate::types::ThinkingEffort>>>>;
+
+    #[derive(Debug)]
+    struct RecordingAutoModeClient {
+        seen: RecordedEfforts,
+        reply: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl crate::llm::LlmClient for RecordingAutoModeClient {
+        async fn chat_completion(
+            &self,
+            _messages: Vec<StarMessage>,
+            _tools: Option<Vec<crate::types::StarTool>>,
+        ) -> Result<crate::types::StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "test provider requires request options",
+            )
+            .into())
+        }
+
+        async fn chat_completion_with_options(
+            &self,
+            _messages: Vec<StarMessage>,
+            _tools: Option<Vec<crate::types::StarTool>>,
+            options: &crate::llm::LlmRequestOptions,
+        ) -> Result<crate::types::StarResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.seen
+                .lock()
+                .expect("recording lock poisoned")
+                .push(options.thinking_effort.clone());
+            match self.reply {
+                Some(reply) => Ok(crate::types::StarResponse {
+                    choices: vec![crate::types::StarChoice {
+                        message: StarMessage::assistant(reply),
+                        finish_reason: "stop".into(),
+                    }],
+                    usage: None,
+                }),
+                None => std::future::pending().await,
+            }
+        }
+
+        fn get_model_info(&self) -> Option<crate::llm::ModelInfo> {
+            None
+        }
+    }
+
+    fn recording_auto_mode_client(
+        reply: Option<&'static str>,
+    ) -> (crate::llm::client::StarClient, RecordedEfforts) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = crate::llm::client::StarClient::new(
+            "offline-test-key",
+            Some("gpt-4o".into()),
+            Some("http://127.0.0.1:9/v1".into()),
+            Some(true),
+            None,
+        )
+        .with_inner_for_test(Box::new(RecordingAutoModeClient {
+            seen: Arc::clone(&seen),
+            reply,
+        }));
+        (client, seen)
+    }
+
+    struct ClassifierTimeoutEnvGuard(Option<std::ffi::OsString>);
+
+    impl ClassifierTimeoutEnvGuard {
+        fn new(value: Option<&str>) -> Self {
+            let guard = Self(std::env::var_os("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT"));
+            match value {
+                Some(value) => std::env::set_var("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT", value),
+                None => std::env::remove_var("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT"),
+            }
+            guard
+        }
+    }
+
+    impl Drop for ClassifierTimeoutEnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT", value),
+                None => std::env::remove_var("STAR_AUTO_MODE_CLASSIFIER_TIMEOUT"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_request_explicitly_disables_max_effort_without_changing_main_client() {
+        use crate::types::ThinkingEffort;
+        let _effort_guard = crate::llm::thinking::TestEffortGuard::new(&ThinkingEffort::Max);
+        let (client, seen) = recording_auto_mode_client(Some("ALLOW requested test run"));
+        client
+            .chat(
+                vec![StarMessage::user("main request before classification")],
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("record main request");
+        let classifier = LlmAutoModeClassifier::new(client.clone(), None, 2);
+        let verdict = classifier.classify(&request()).await;
+        assert!(matches!(verdict, AutoVerdict::Allow { .. }), "{verdict:?}");
+        assert_eq!(crate::llm::thinking::current_effort(), ThinkingEffort::Max);
+        client
+            .chat(
+                vec![StarMessage::user("main request after classification")],
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("record main request after classification");
+        assert_eq!(
+            *seen.lock().expect("recording lock poisoned"),
+            vec![
+                Some(ThinkingEffort::Max),
+                Some(ThinkingEffort::Off),
+                Some(ThinkingEffort::Max)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn classifier_off_request_still_asks_at_default_and_overridden_timeout() {
+        use crate::types::ThinkingEffort;
+        let _effort_guard = crate::llm::thinking::TestEffortGuard::new(&ThinkingEffort::Max);
+        // 串行库测试中临时覆盖环境并恢复原值；挂起替身不执行网络请求。
+        for (configured, expected_seconds) in [(None, 2), (Some("1"), 1)] {
+            let _timeout_guard = ClassifierTimeoutEnvGuard::new(configured);
+            let timeout = LlmAutoModeClassifier::timeout_from_env();
+            assert_eq!(timeout, expected_seconds);
+            let (client, seen) = recording_auto_mode_client(None);
+            let classifier = LlmAutoModeClassifier::new(client, None, timeout);
+            let started = std::time::Instant::now();
+            let verdict = classifier.classify(&request()).await;
+            assert!(matches!(verdict, AutoVerdict::Ask { .. }), "{verdict:?}");
+            assert!(
+                verdict
+                    .reason()
+                    .contains(&format!("timed out after {expected_seconds}s")),
+                "{verdict:?}"
+            );
+            assert!(started.elapsed() >= std::time::Duration::from_secs(expected_seconds));
+            assert_eq!(
+                *seen.lock().expect("recording lock poisoned"),
+                vec![Some(ThinkingEffort::Off)]
+            );
+            assert_eq!(crate::llm::thinking::current_effort(), ThinkingEffort::Max);
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_off_failures_trip_breaker_and_keep_asking_without_new_requests() {
+        use crate::types::ThinkingEffort;
+        let _effort_guard = crate::llm::thinking::TestEffortGuard::new(&ThinkingEffort::Max);
+        let (client, seen) = recording_auto_mode_client(Some(""));
+        let classifier = Arc::new(LlmAutoModeClassifier::new(client, None, 2));
+        let breaker = CircuitBreakingClassifier::new(classifier, 2, 3600);
+        for _ in 0..2 {
+            let verdict = breaker.classify(&request()).await;
+            assert!(matches!(verdict, AutoVerdict::Ask { .. }), "{verdict:?}");
+            assert!(verdict.reason().contains("empty response"), "{verdict:?}");
+        }
+        assert!(!breaker.is_available());
+        let verdict = breaker.classify(&request()).await;
+        assert!(matches!(verdict, AutoVerdict::Ask { .. }), "{verdict:?}");
+        assert!(verdict.reason().contains("circuit breaker"), "{verdict:?}");
+        assert_eq!(
+            *seen.lock().expect("recording lock poisoned"),
+            vec![Some(ThinkingEffort::Off), Some(ThinkingEffort::Off)]
+        );
+        assert_eq!(crate::llm::thinking::current_effort(), ThinkingEffort::Max);
     }
 }

@@ -305,7 +305,39 @@ pub async fn read_latest_session_id() -> Result<Option<String>, Box<dyn Error + 
         return Ok(None);
     }
 
-    Ok(Some(id.to_string()))
+    let target = session_path(id)?;
+    match tokio::fs::metadata(target).await {
+        Ok(_) => return Ok(Some(id.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    // 删除会话可能留下悬空指针；仅隐式恢复回退，显式 ID 仍由 load_session 报错。
+    let mut newest: Option<(i64, String)> = None;
+    let mut entries = tokio::fs::read_dir(sessions_dir()?).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(candidate) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if session_path(candidate).is_err() || !entry.file_type().await?.is_file() {
+            continue;
+        }
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let session: Session = serde_json::from_str(&content)?;
+        let candidate = (session.created_at, candidate.to_string());
+        if newest.as_ref().is_none_or(|current| candidate > *current) {
+            newest = Some(candidate);
+        }
+    }
+    Ok(newest.map(|(_, id)| id))
 }
 
 fn summarize_session(id: &str, session: &Session, is_latest: bool) -> SessionSummary {
@@ -397,6 +429,133 @@ mod tests {
                 arguments: arguments.to_string(),
             },
         }
+    }
+
+    struct SessionTestProject {
+        original_dir: PathBuf,
+        _directory: tempfile::TempDir,
+    }
+
+    impl SessionTestProject {
+        fn new() -> Self {
+            let original_dir = std::env::current_dir().expect("读取原工作目录");
+            let directory = tempfile::tempdir().expect("创建隔离会话目录");
+            std::fs::create_dir(directory.path().join(".star")).expect("隔离项目存储");
+            // 会话存储读取缓存 cwd，必须使用正式切目录入口同步并清理路径缓存。
+            crate::core::utils::paths::set_current_dir(directory.path()).expect("进入隔离项目");
+            Self {
+                original_dir,
+                _directory: directory,
+            }
+        }
+    }
+
+    impl Drop for SessionTestProject {
+        fn drop(&mut self) {
+            crate::core::utils::paths::set_current_dir(&self.original_dir)
+                .expect("恢复工作目录及缓存");
+        }
+    }
+
+    async fn save_fixture_session(id: &str, created_at: i64) {
+        save_session_record(&Session {
+            id: id.to_string(),
+            created_at,
+            chat_history: vec![ChatEntry::user(id)],
+            agent_messages: None,
+            pending_local_context: None,
+            last_usage: None,
+        })
+        .await
+        .expect("保存隔离会话");
+    }
+
+    #[tokio::test]
+    async fn deleting_latest_session_keeps_implicit_resume_available() {
+        let _project = SessionTestProject::new();
+        save_fixture_session("oldest", 10).await;
+        save_fixture_session("remaining", 20).await;
+        save_fixture_session("deleted", 30).await;
+        delete_session("deleted").await.unwrap();
+
+        assert_eq!(
+            read_latest_session_id().await.unwrap().as_deref(),
+            Some("remaining")
+        );
+        assert_eq!(load_latest_session().await.unwrap().id, "remaining");
+        assert!(
+            load_session("deleted").await.is_err(),
+            "显式恢复不能偷换会话"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_last_session_leaves_no_implicit_resume_target() {
+        let _project = SessionTestProject::new();
+        save_fixture_session("only", 10).await;
+        delete_session("only").await.unwrap();
+        assert_eq!(read_latest_session_id().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn latest_session_keeps_existing_marker_authoritative() {
+        let _project = SessionTestProject::new();
+        save_fixture_session("newer-timestamp", 100).await;
+        save_fixture_session("chosen", 1).await;
+        delete_session("newer-timestamp").await.unwrap();
+        assert_eq!(
+            read_latest_session_id().await.unwrap().as_deref(),
+            Some("chosen")
+        );
+        std::fs::write(session_path("chosen").unwrap(), "{broken").unwrap();
+        assert_eq!(
+            read_latest_session_id().await.unwrap().as_deref(),
+            Some("chosen")
+        );
+        assert!(
+            load_latest_session().await.is_err(),
+            "原指针损坏必须暴露错误"
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_session_fallback_preserves_errors_and_canonical_filename() {
+        let _project = SessionTestProject::new();
+        save_fixture_session("canonical", 10).await;
+        save_fixture_session("deleted", 20).await;
+        delete_session("deleted").await.unwrap();
+        let path = session_path("canonical").unwrap();
+        let mut session: Session =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        session.id = "untrusted-embedded-id".to_string();
+        std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(
+            read_latest_session_id().await.unwrap().as_deref(),
+            Some("canonical")
+        );
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(
+            read_latest_session_id().await.is_err(),
+            "回退扫描不得吞掉损坏存档"
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_session_empty_missing_invalid_and_unreadable_markers_stay_distinct() {
+        let _project = SessionTestProject::new();
+        assert_eq!(read_latest_session_id().await.unwrap(), None);
+        save_fixture_session("saved", 1).await;
+        let marker = latest_session_marker_path().unwrap();
+        std::fs::write(&marker, " \n").unwrap();
+        assert_eq!(read_latest_session_id().await.unwrap(), None);
+        std::fs::write(&marker, "../outside").unwrap();
+        assert!(read_latest_session_id().await.is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(
+            read_latest_session_id().await.is_err(),
+            "标记读取 I/O 错误不得隐藏"
+        );
     }
 
     #[test]

@@ -220,7 +220,8 @@ pub(crate) async fn execute_palette_action(
         }
         PaletteAction::TypeCommand(cmd) => {
             state.close_palette();
-            state.input = cmd;
+            state.set_input_text(&cmd);
+            crate::ui::services::suggestions::on_input_changed(state);
         }
         PaletteAction::SelectProvider(provider_id) => {
             state.available_models.clear();

@@ -131,6 +131,21 @@ impl MessageBus {
             .await
     }
 
+    /// 同一策略入口消费已有授权；显式规则与模式限制仍优先。
+    pub(crate) async fn check_tool_policy_with_permission_for(
+        &self,
+        tool_call: &crate::core::policy::FunctionCall,
+        server_name: Option<&str>,
+        policy_identity: Option<&str>,
+        permission: crate::core::permissions::PermissionHit,
+    ) -> crate::core::policy::CheckResult {
+        self.policy_engine
+            .read()
+            .await
+            .check_with_permission_for(tool_call, server_name, policy_identity, permission)
+            .await
+    }
+
     /// 应用 skill 的本轮工具策略（`allowed-tools` / `disallowed-tools`）。
     ///
     /// 只到下一条用户消息为止 —— 由 [`Self::clear_turn_tool_policy`] 清掉。
@@ -205,7 +220,7 @@ impl MessageBus {
                     read_only: None,
                 };
                 let check_result = policy_engine
-                    .check_for(
+                    .recheck_local_for(
                         &tool_call,
                         req.server_name.as_deref(),
                         req.policy_identity.as_deref(),

@@ -391,6 +391,20 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 sub_commands: &[],
             },
             SlashCommand {
+                name: "inspect",
+                alt_names: &[],
+                description: "Inspect a plugin in detail",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "validate",
+                alt_names: &[],
+                description: "Validate plugin runtime manifests",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
                 name: "install",
                 alt_names: &[],
                 description: "Install plugin from local or Git source",
@@ -401,6 +415,55 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 name: "remove",
                 alt_names: &[],
                 description: "Remove plugin",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "enable",
+                alt_names: &[],
+                description: "Enable an installed plugin",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "disable",
+                alt_names: &[],
+                description: "Disable an installed plugin",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "update",
+                alt_names: &[],
+                description: "Update installed plugins",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "run",
+                alt_names: &[],
+                description: "Run a plugin-provided slash command",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "hooks",
+                alt_names: &[],
+                description: "List plugin-provided hooks",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "commands",
+                alt_names: &[],
+                description: "List plugin-provided slash commands",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "tools",
+                alt_names: &[],
+                description: "List plugin-provided agent tools",
                 category: "Automation",
                 sub_commands: &[],
             },
@@ -2430,7 +2493,7 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
             let args = remainder_after_words(without_slash, consumed_parts).to_string();
             ParsedCommand { path, args }
         })
-        .or_else(|| resolve_unique_prefix(&parts, consumed_parts))
+        .or_else(|| resolve_unique_prefix(without_slash))
 }
 
 /// 前缀唯一化兜底（对标 Claude Code：部分命令名也能解析）。
@@ -2439,8 +2502,8 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
 /// 片段为前缀的命令：唯一命中直接解析成它，多个命中保持 None（提交路径
 /// 会给出 "did you mean" 提示，浮层照常列出候选）。只处理第一个片段 ——
 /// 子命令层级的前缀歧义交给浮层选择，不在这里猜。
-fn resolve_unique_prefix(parts: &[&str], _consumed: usize) -> Option<ParsedCommand> {
-    let first = parts.first()?;
+fn resolve_unique_prefix(input: &str) -> Option<ParsedCommand> {
+    let first = input.split_whitespace().next()?;
     let matches: Vec<&SlashCommand> = ALL_COMMANDS
         .iter()
         .filter(|cmd| cmd.name.starts_with(first))
@@ -2448,7 +2511,7 @@ fn resolve_unique_prefix(parts: &[&str], _consumed: usize) -> Option<ParsedComma
     match matches.as_slice() {
         [cmd] => Some(ParsedCommand {
             path: vec![cmd.name.to_string()],
-            args: remainder_after_words(&parts.join(" "), 1).to_string(),
+            args: remainder_after_words(input, 1).to_string(),
         }),
         _ => None,
     }
@@ -2686,12 +2749,7 @@ fn command_candidates(input: &str) -> (String, Vec<&'static SlashCommand>) {
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
 
-    if scored.is_empty() {
-        // 没有模糊命中时退回"当前层级全部命令"。
-        (prefix, current_commands.iter().collect())
-    } else {
-        (prefix, scored.into_iter().map(|(_, cmd)| cmd).collect())
-    }
+    (prefix, scored.into_iter().map(|(_, cmd)| cmd).collect())
 }
 
 /// 命令面板（Ctrl+P 同款窗口）里的命令条目。
@@ -2771,6 +2829,138 @@ pub fn command_argument_hint(input: &str) -> Option<String> {
     None
 }
 
+/// 插件候选只保留展示元数据，不携带可执行载荷。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginCommandCandidate {
+    pub name: String,
+    pub description: String,
+}
+
+// 分发表仍接受但静态发现表未声明的兼容入口，不能被插件候选冒名。
+const LEGACY_DISPATCH_NAMES: &[&str] = &[
+    "agent-create",
+    "agent-delete",
+    "agent-list",
+    "agent-switch",
+    "compact-ext",
+    "config-export",
+    "config-ext",
+    "config-import",
+    "config-reset",
+    "config-set",
+    "config-show",
+    "debug-log",
+    "debug-perf",
+    "debug-state",
+    "debug-tokens",
+    "debug-tools",
+    "deep-link",
+    "feature-flags",
+    "git-blame",
+    "git-branch",
+    "git-diff",
+    "git-log",
+    "git-merge",
+    "git-rebase",
+    "git-stash",
+    "git-status",
+    "git-tag",
+    "mdm",
+    "notifications",
+    "remote-settings",
+    "session-delete",
+    "session-export",
+    "session-list",
+    "session-resume",
+    "session-title",
+    "suggestions",
+    "wiki",
+    "workflow-create",
+    "workflow-edit",
+    "workflow-list",
+    "workflow-run",
+];
+
+/// 与提交分流保持一致：内置精确名、别名、唯一前缀和兼容入口均不能被插件占用。
+pub(crate) fn can_dispatch_plugin_command(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && !name.chars().any(char::is_whitespace)
+        && !LEGACY_DISPATCH_NAMES.contains(&name)
+        && parse_command(&format!("/{name}")).is_none()
+}
+
+fn usable_plugin_candidates(plugins: &[PluginCommandCandidate]) -> Vec<&PluginCommandCandidate> {
+    let mut counts = HashMap::new();
+    for plugin in plugins {
+        *counts.entry(plugin.name.as_str()).or_insert(0usize) += 1;
+    }
+    plugins
+        .iter()
+        .filter(|plugin| {
+            counts.get(plugin.name.as_str()) == Some(&1)
+                && can_dispatch_plugin_command(&plugin.name)
+        })
+        .collect()
+}
+
+pub(crate) fn get_command_hints_with_plugins(
+    input: &str,
+    plugins: &[PluginCommandCandidate],
+) -> Vec<String> {
+    command_palette_items_with_plugins(input, plugins)
+        .into_iter()
+        .map(|item| format!("{} - {}", item.label, item.description))
+        .collect()
+}
+
+pub(crate) fn command_palette_items_with_plugins(
+    input: &str,
+    plugins: &[PluginCommandCandidate],
+) -> Vec<crate::ui::state::PaletteItem> {
+    let Some(query) = input.strip_prefix('/') else {
+        return Vec::new();
+    };
+    let usable = usable_plugin_candidates(plugins);
+    if query
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| usable.iter().any(|plugin| plugin.name == name))
+    {
+        // 动态命令是叶子；再次 Enter 必须落到提交，参数也不能被补全覆盖。
+        return Vec::new();
+    }
+    let mut items = command_palette_items(input);
+    if !query.is_empty() && query.chars().any(char::is_whitespace) {
+        return items;
+    }
+    let query = query.to_lowercase();
+    let mut dynamic: Vec<_> = usable
+        .into_iter()
+        .filter_map(|plugin| {
+            fuzzy_score_parts(&plugin.name, &[], &plugin.description, &query).map(|score| {
+                (
+                    score,
+                    crate::ui::state::PaletteItem {
+                        id: format!("plugin_command_{}", plugin.name),
+                        label: format!("/{}", plugin.name),
+                        description: plugin.description.replace(['\r', '\n'], " "),
+                        category: Some("Automation".to_string()),
+                        action: crate::ui::state::PaletteAction::TypeCommand(format!(
+                            "/{} ",
+                            plugin.name
+                        )),
+                    },
+                )
+            })
+        })
+        .collect();
+    dynamic.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
+    // 静态项保持既有排序与优先级；动态项内部复用相同评分。
+    items.extend(dynamic.into_iter().map(|(_, item)| item));
+    items
+}
+
 /// 获取命令补全提示
 pub fn get_command_hints(input: &str) -> Vec<String> {
     let (prefix, candidates) = command_candidates(input);
@@ -2786,10 +2976,14 @@ pub fn get_command_hints(input: &str) -> Vec<String> {
 /// 加权 fuzzy 评分；None 表示不匹配。权重参考 Claude Code 的 fuse.js 配置
 /// （commandName 3 > name-parts/aliases 2 > description words 0.5）。
 pub(crate) fn fuzzy_score(cmd: &SlashCommand, query: &str) -> Option<i32> {
+    fuzzy_score_parts(cmd.name, cmd.alt_names, cmd.description, query)
+}
+
+fn fuzzy_score_parts(name: &str, aliases: &[&str], description: &str, query: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(0);
     }
-    let name = cmd.name.to_lowercase();
+    let name = name.to_lowercase();
     let q = query.to_lowercase();
 
     if name == q {
@@ -2804,7 +2998,7 @@ pub(crate) fn fuzzy_score(cmd: &SlashCommand, query: &str) -> Option<i32> {
         return Some(600);
     }
     // alias 精确 > alias 前缀
-    for a in cmd.alt_names {
+    for a in aliases {
         let a = a.to_lowercase();
         if a == q {
             return Some(500);
@@ -2818,8 +3012,7 @@ pub(crate) fn fuzzy_score(cmd: &SlashCommand, query: &str) -> Option<i32> {
         return Some(300 - (gaps as i32).min(200));
     }
     // 描述词前缀
-    if cmd
-        .description
+    if description
         .to_lowercase()
         .split_whitespace()
         .any(|w| w.starts_with(&q))
@@ -2948,6 +3141,174 @@ pub fn format_help() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dynamic_command(name: &str, description: &str) -> PluginCommandCandidate {
+        PluginCommandCandidate {
+            name: name.to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    #[test]
+    fn dynamic_plugin_completion_appears_in_hints_and_palette() {
+        let plugins = [dynamic_command("fixture-check", "Inspect fixture metadata")];
+        let hints = get_command_hints_with_plugins("/fixture-c", &plugins);
+        assert_eq!(hints, ["/fixture-check - Inspect fixture metadata"]);
+        let palette = command_palette_items_with_plugins("/fixture-c", &plugins);
+        assert_eq!(palette.len(), 1);
+        assert_eq!(palette[0].label, "/fixture-check");
+        assert_eq!(palette[0].description, "Inspect fixture metadata");
+        assert!(matches!(
+            &palette[0].action,
+            crate::ui::state::PaletteAction::TypeCommand(command) if command == "/fixture-check "
+        ));
+        assert!(get_command_hints_with_plugins("/", &plugins)
+            .iter()
+            .any(|hint| hint.starts_with("/fixture-check - ")));
+    }
+
+    #[test]
+    fn dynamic_plugin_completion_respects_executable_names_and_ambiguity() {
+        let plugins = [
+            dynamic_command("compact", "Do not shadow an alias"),
+            dynamic_command("help", "Do not shadow a builtin"),
+            dynamic_command("mem", "Do not shadow unique-prefix dispatch"),
+            dynamic_command("git-status", "Do not shadow a legacy dispatcher"),
+            dynamic_command("fixture-clash", "First ambiguous provider"),
+            dynamic_command("fixture-clash", "Second ambiguous provider"),
+            dynamic_command("fixture-safe", "Safe plugin command"),
+        ];
+        let hints = get_command_hints_with_plugins("/", &plugins);
+        assert!(!hints.iter().any(|hint| hint.contains("Do not shadow")));
+        assert!(!hints.iter().any(|hint| hint.contains("ambiguous provider")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.starts_with("/fixture-safe - ")));
+        let palette = command_palette_items_with_plugins("/", &plugins);
+        assert!(!palette.iter().any(|item| item.label == "/fixture-clash"));
+        assert!(palette.iter().any(|item| item.label == "/fixture-safe"));
+    }
+
+    #[test]
+    fn dynamic_plugin_completion_reserves_every_literal_dispatch_arm() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split("pub async fn handle_command(")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        for line in body.lines().filter(|line| line.starts_with("        \"")) {
+            let pattern = line
+                .split("=>")
+                .next()
+                .unwrap()
+                .split(" if ")
+                .next()
+                .unwrap();
+            for name in pattern.split('"').skip(1).step_by(2) {
+                let plugin = dynamic_command(name, "Must not shadow dispatcher");
+                assert!(usable_plugin_candidates(&[plugin]).is_empty(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_plugin_completion_preserves_leaves_arguments_and_command_levels() {
+        let plugins = [
+            dynamic_command("fixture-check", "Inspect fixture metadata"),
+            dynamic_command("fixture-child", "Related command"),
+        ];
+        for input in [
+            "/fixture-check",
+            "/fixture-check ",
+            "/fixture-check --path \"a b\"",
+            "/mcp fixture-c",
+            "/zzzzzzzzzz",
+        ] {
+            assert!(
+                get_command_hints_with_plugins(input, &plugins).is_empty(),
+                "{input}"
+            );
+            assert!(
+                command_palette_items_with_plugins(input, &plugins).is_empty(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_subcommands_match_the_executable_clap_commands() {
+        let executable =
+            <crate::commands::plugin::PluginCommand as clap::Subcommand>::augment_subcommands(
+                clap::Command::new("plugin"),
+            );
+        let expected: std::collections::BTreeSet<_> = executable
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect();
+        let plugin = ALL_COMMANDS
+            .iter()
+            .find(|command| command.name == "plugin")
+            .expect("plugin command is declared");
+        let declared: std::collections::BTreeSet<_> = plugin
+            .sub_commands
+            .iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(
+            declared, expected,
+            "executable plugin commands must be discoverable"
+        );
+    }
+
+    #[test]
+    fn plugin_runtime_entry_points_appear_in_completion_and_help() {
+        let hints = get_command_hints("/plugin ");
+        let palette = command_palette_items("/plugin ");
+        let (plugin, path) =
+            find_command_path(&["plugin".to_string()]).expect("plugin command is declared");
+        let help = render_command_help(plugin, &path);
+        for name in [
+            "inspect", "validate", "enable", "disable", "update", "run", "hooks", "commands",
+            "tools",
+        ] {
+            let command = format!("/plugin {name}");
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.starts_with(&format!("{command} - "))),
+                "missing hint: {command}"
+            );
+            assert!(
+                palette.iter().any(|item| item.label == command),
+                "missing palette entry: {command}"
+            );
+            assert!(
+                help.contains(&format!("`{command}`")),
+                "missing help: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_run_preserves_arguments_without_completing_them() {
+        for input in [
+            "/plugin run",
+            "/plugin run custom-check --fix",
+            "/plugin commands example-plugin",
+        ] {
+            assert!(get_command_hints(input).is_empty(), "input={input}");
+            assert!(command_palette_items(input).is_empty(), "input={input}");
+        }
+        let parsed = parse_command("/plugin run custom-check --fix").expect("plugin run parses");
+        assert_eq!(parsed.path, vec!["plugin", "run"]);
+        assert_eq!(
+            parsed_command_args(&parsed),
+            vec!["run", "custom-check", "--fix"]
+        );
+    }
 
     /// `format_help` 只遍历 `HELP_CATEGORIES` 白名单，分类拼错的命令会从 /help 里消失
     /// （命令仍可用、仍能补全，只是没人找得到）。这条断言把那种静默丢失变成编译后立刻失败。
@@ -3182,6 +3543,22 @@ mod tests {
         );
         // 完全不匹配：同样 None
         assert!(parse_command("/zzz").is_none());
+    }
+
+    #[test]
+    fn unique_prefix_preserves_raw_argument_spacing() {
+        for tail in [
+            r#""focus  on API" """#,
+            "\"focus\ton API\"\t''",
+            "",
+            "plain  words",
+        ] {
+            let full = parse_command(&format!("/compress {tail}")).expect("完整命令应解析");
+            let prefix = parse_command(&format!("/comp {tail}")).expect("唯一前缀应解析");
+            assert_eq!(prefix.path, full.path);
+            assert_eq!(prefix.args, full.args, "原始参数必须保留：{tail:?}");
+            assert_eq!(parsed_command_args(&prefix), parsed_command_args(&full));
+        }
     }
 
     /// `/branch` is now a top-level conversation command, while `/git branch`

@@ -67,6 +67,36 @@ fn parse_usage(usage: &serde_json::Map<String, serde_json::Value>) -> Option<Sta
         })
 }
 
+/// usage、角色和空心跳都不代表模型已开始产生输出。
+fn chunk_has_model_output(chunk: &serde_json::Value) -> bool {
+    let Some(delta) = chunk
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+    else {
+        return false;
+    };
+    let has_text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    };
+    has_text(delta.get("content"))
+        || has_text(delta.get("reasoning_content"))
+        || delta
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|calls| {
+                calls.iter().any(|call| {
+                    has_text(call.get("id"))
+                        || call.get("function").is_some_and(|function| {
+                            has_text(function.get("name")) || has_text(function.get("arguments"))
+                        })
+                })
+            })
+}
+
 /// LLM 调用的结果
 pub(crate) enum LlmResult {
     Success {
@@ -98,6 +128,11 @@ impl Agent {
         recovery_manager: &mut RecoveryManager,
         loop_state: &mut LoopState,
     ) -> LlmResult {
+        let prepare_started_at = Instant::now();
+        self.emit_event(AgentEvent::Trace {
+            event: "model_request_preparing".to_string(),
+            payload: serde_json::json!({"turn": current_turn}),
+        });
         let verbose_debug_logging = crate::utils::logging::is_verbose_debug_logging_enabled();
 
         // Token 用量预估日志
@@ -249,6 +284,14 @@ impl Agent {
         let request_options = crate::llm::LlmRequestOptions {
             thinking_effort: Some(self.thinking_effort.clone()),
         };
+        let model_request_started_at = Instant::now();
+        self.emit_event(AgentEvent::Trace {
+            event: "model_request_started".to_string(),
+            payload: serde_json::json!({
+                "turn": current_turn,
+                "prepare_elapsed_ms": prepare_started_at.elapsed().as_millis() as u64,
+            }),
+        });
         let stream_result = tokio::select! {
             biased;
             _ = async {
@@ -279,8 +322,6 @@ impl Agent {
                     .await;
             }
         };
-
-        let model_request_started_at = Instant::now();
 
         if verbose_debug_logging {
             crate::utils::logging::append_debug_log_line(
@@ -485,8 +526,15 @@ impl Agent {
                         }
                     }
 
-                    if !first_model_chunk_seen {
+                    if !first_model_chunk_seen && chunk_has_model_output(&json) {
                         first_model_chunk_seen = true;
+                        self.emit_event(AgentEvent::Trace {
+                            event: "model_first_chunk".to_string(),
+                            payload: serde_json::json!({
+                                "turn": current_turn,
+                                "elapsed_ms": model_request_started_at.elapsed().as_millis() as u64,
+                            }),
+                        });
                     }
 
                     // Parse usage update
@@ -1318,6 +1366,30 @@ impl Agent {
 mod tests {
     use super::parse_usage;
     use serde_json::json;
+
+    #[test]
+    fn phase_accuracy_first_chunk_requires_model_output_not_heartbeats() {
+        for chunk in [
+            json!({}),
+            json!({"usage": {"total_tokens": 1}}),
+            json!({"choices": [{"delta": {"role": "assistant"}}]}),
+            json!({"choices": [{"delta": {"content": "", "reasoning_content": " \n", "tool_calls": []}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ""}}]}}]}),
+            json!({"choices": [{"finish_reason": "stop", "delta": {}}]}),
+        ] {
+            assert!(!super::chunk_has_model_output(&chunk), "{chunk}");
+        }
+        for delta in [
+            json!({"content": "answer"}),
+            json!({"reasoning_content": "compare branches"}),
+            json!({"tool_calls": [{"index": 0, "id": "call-1"}]}),
+            json!({"tool_calls": [{"index": 0, "function": {"name": "Read"}}]}),
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "{"}}]}),
+        ] {
+            let chunk = json!({"choices": [{"delta": delta}]});
+            assert!(super::chunk_has_model_output(&chunk), "{chunk}");
+        }
+    }
 
     #[test]
     fn parse_usage_preserves_canonical_cache_telemetry() {

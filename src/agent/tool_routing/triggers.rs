@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// 自动触发器类型——**同分时的**优先级（从高到低排列）。
+/// 自动触发器类型，同分时用于稳定排序。
 ///
 /// # 排序规则改了：分数优先，kind 只做平手裁决
 ///
@@ -15,8 +15,6 @@ use std::sync::OnceLock;
 /// 才按 Verification > CodebaseSearch > … 的安全序兜底。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AutoTriggerKind {
-    /// 验证（编辑后必须检查，语义上最硬）
-    Verification = 10,
     /// 语义搜索
     CodebaseSearch = 5,
     /// JSON回退（已检测到行动意图但无工具调用）
@@ -117,10 +115,10 @@ impl RouteFlags {
 
 /// 评估所有可用的自动触发器，返回**分数最高**的那个。
 ///
-/// `verification_required` 走短路：编辑后必须验证，不是打分能压过去的。
+/// 编辑验证在下一次 provider 请求前处理，文本终稿不会触发额外工具调用。
 pub(crate) fn select_best_auto_trigger(
-    verification_required: bool,
-    skip_verification: bool,
+    _verification_required: bool,
+    _skip_verification: bool,
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
@@ -133,8 +131,8 @@ pub(crate) fn select_best_auto_trigger(
     available_skills: &SkillAvailability,
 ) -> Option<TriggerEval> {
     select_best_auto_trigger_with_flags(
-        verification_required,
-        skip_verification,
+        false,
+        false,
         user_input,
         current_content,
         active_tools,
@@ -151,8 +149,8 @@ pub(crate) fn select_best_auto_trigger(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_best_auto_trigger_with_flags(
-    verification_required: bool,
-    skip_verification: bool,
+    _verification_required: bool,
+    _skip_verification: bool,
     user_input: &str,
     current_content: &str,
     active_tools: &HashSet<String>,
@@ -167,16 +165,7 @@ pub(crate) fn select_best_auto_trigger_with_flags(
 ) -> Option<TriggerEval> {
     let mut candidates: Vec<TriggerEval> = Vec::new();
 
-    // 验证触发器 — 短路：安全约束优先于任何相关性打分
-    if verification_required && !skip_verification {
-        candidates.push(TriggerEval {
-            kind: AutoTriggerKind::Verification,
-            score: 100,
-            reason: "edits_detected_requires_verification",
-            detail: "verification_required && !skip_verification".to_string(),
-        });
-    }
-
+    // 编辑债务在下一次 provider 请求前处理；终稿已经流出后不能再强塞检查。
     // 语义搜索 — 只有真的像"跨文件排序定位"时才进候选
     if let Some(score) = score_rank_locate_route(user_input) {
         if should_trigger_codebase_search_with_flag(
@@ -1409,9 +1398,9 @@ mod tests {
         assert_eq!(picked.score, 10);
     }
 
-    /// 回归：编辑后必须验证，短路优先级不能被分数压过去。
+    /// 终稿阶段不再根据遗留编辑债务合成验证调用。
     #[test]
-    fn verification_short_circuits_scoring() {
+    fn verification_does_not_reopen_a_text_only_final_response() {
         let picked = select_best_auto_trigger_with_flags(
             true,
             false,
@@ -1429,9 +1418,8 @@ mod tests {
         );
         assert_eq!(
             picked.as_ref().map(|p| p.kind),
-            Some(AutoTriggerKind::Verification)
+            Some(AutoTriggerKind::CodebaseSearch)
         );
-        assert_eq!(picked.map(|p| p.score), Some(100));
     }
 
     /// 强扫面信号 + 模型沉默 → 选 CodebaseSearch，且带可解释的 detail。

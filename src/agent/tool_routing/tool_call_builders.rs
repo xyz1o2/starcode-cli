@@ -313,8 +313,8 @@ pub(crate) fn build_explore_tool_call(user_input: &str, turn: i32) -> StarToolCa
     build_tool_call("CodeGraph", &args)
 }
 
-pub(crate) fn build_validation_tool_call(turn: i32) -> StarToolCall {
-    build_tool_call("GetDiagnostics", &serde_json::json!({"turn": turn}))
+pub(crate) fn build_validation_tool_call() -> StarToolCall {
+    build_tool_call("GetDiagnostics", &serde_json::json!({}))
 }
 
 pub(crate) fn build_json_fallback_prompt(
@@ -496,7 +496,15 @@ mod tests {
         assert_eq!(extract_search_keywords("????"), "????");
     }
 
-    /// 冷启动补跑必须与首查**可区分**。
+    #[test]
+    fn automatic_diagnostics_call_has_no_undeclared_arguments() {
+        let call = build_validation_tool_call();
+        let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
+        assert_eq!(call.function.name, "GetDiagnostics");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    /// 冷启动补跑必须与首查**可区分**.
     ///
     /// 事故记录（旧 tool-io-token-audit §1.5）里 `turn=1` 出现了两次
     /// 完全相同的调用 —— 根因就是补跑沿用了首查的 query 与 turn。

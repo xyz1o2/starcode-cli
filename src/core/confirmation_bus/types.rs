@@ -9,6 +9,8 @@ pub enum MessageBusType {
     ToolConfirmationRequest,
     #[serde(rename = "tool-confirmation-response")]
     ToolConfirmationResponse,
+    #[serde(rename = "tool-approval-recorded")]
+    ToolApprovalRecorded,
     #[serde(rename = "tool-policy-rejection")]
     ToolPolicyRejection,
     #[serde(rename = "tool-execution-success")]
@@ -255,9 +257,22 @@ pub enum HookDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolApprovalRecorded {
+    #[serde(rename = "type")]
+    pub message_type: MessageBusType,
+    pub correlation_id: String,
+    pub originating_tool_call_id: Option<String>,
+    pub persisted: bool,
+    pub requested_persist: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
     ToolConfirmationRequest(ToolConfirmationRequest),
+    ToolApprovalRecorded(ToolApprovalRecorded),
     ToolConfirmationResponse(ToolConfirmationResponse),
     ToolPolicyRejection(ToolPolicyRejection),
     ToolExecutionSuccess(ToolExecutionSuccess),

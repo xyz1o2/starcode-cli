@@ -240,6 +240,14 @@ pub enum StreamMessage {
         originating_tool_call_id: Option<String>,
         confirmation: crate::types::ToolConfirmation,
     },
+    ToolApprovalRecorded {
+        /// 与待确认卡关联的 bus correlation id，不可用当前 active 卡推断。
+        correlation_id: String,
+        originating_tool_call_id: Option<String>,
+        persisted: bool,
+        requested_persist: bool,
+        error: Option<String>,
+    },
     ModelsList {
         models: Vec<crate::types::ModelInfo>,
         /// `None` = 刚从 API 拉的；`Some(n)` = 命中缓存，n 秒前拉的。

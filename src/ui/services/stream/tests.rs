@@ -418,7 +418,8 @@ async fn a_failed_model_switch_says_which_model_and_why() {
         ContextWindowSelection, ContextWindowSource, ResolvedContextPolicy, RuntimeSettingOutcome,
     };
 
-    let mut state = ChatState::new();
+    crate::core::i18n::reset_for_tests();
+    let mut state = ChatState::test_fixture();
     let selection = ContextWindowSelection::default();
 
     // requested = 用户选的 deepseek；active = 仍然生效的旧模型 —— 切换没成。
@@ -1781,7 +1782,7 @@ async fn tool_result_for_the_awaited_call_clears_the_pending_confirmation() {
 /// 和"实际执行的那一条"之间的对应关系。
 #[tokio::test]
 async fn a_new_confirmation_never_retargets_a_pending_card() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
 
     handle_stream_update(
@@ -1813,7 +1814,7 @@ async fn a_new_confirmation_never_retargets_a_pending_card() {
     .await
     .unwrap();
 
-    // 旧卡必须原样保留，且不再是可以回答的那一张。
+    // 旧卡必须原样保留，继续等待用户回答。
     let first = &state.chat_history[first_idx];
     let first_prompt = match &first.confirmation.as_ref().expect("确认卡").details {
         crate::types::ConfirmationDetails::Generic { prompt, .. } => prompt.clone(),
@@ -1829,46 +1830,42 @@ async fn a_new_confirmation_never_retargets_a_pending_card() {
             .as_ref()
             .expect("确认卡")
             .outcome
-            .as_deref()
-            .unwrap_or_default()
-            .to_lowercase()
-            .contains("queued"),
-        "被顶下去的卡必须标成排队中，不能看起来还能按"
+            .is_none(),
+        "正在等待回答的卡片不能因并发请求被改成排队状态"
     );
     assert_eq!(
         state.pending_confirmation_queue.len(),
         1,
-        "被顶下去的请求必须留在队列里，否则它的门禁会永远等"
+        "新请求必须排队，不能抢占当前卡"
     );
 
-    // 新的那张才是当前等待回答的。
-    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-2"));
+    // 当前用户正在看的请求仍是唯一可回答项；新请求另起卡并排队。
+    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-1"));
     assert_eq!(
         state.pending_confirmation_originating_id.as_deref(),
-        Some("call-2")
+        Some("call-1")
     );
-    assert_ne!(
-        state.pending_confirmation_entry_idx,
-        Some(first_idx),
-        "新请求必须另起一张卡，不能复用旧的索引"
-    );
-
-    // 回答完新的那张，旧请求必须接上 —— 不能像以前那样被丢掉。
-    state.clear_pending_confirmation();
-    assert!(
-        state.is_awaiting_confirmation,
-        "队列里还有请求时必须继续等待回答"
-    );
-    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-1"));
     assert_eq!(state.pending_confirmation_entry_idx, Some(first_idx));
+    let queued = state
+        .pending_confirmation_queue
+        .front()
+        .expect("second request is queued");
+    assert_eq!(queued.tool_call_id, "corr-2");
+    assert_eq!(queued.originating_tool_call_id.as_deref(), Some("call-2"));
+
+    // 回答完当前卡后才激活队首。
+    state.clear_pending_confirmation();
+    assert!(state.is_awaiting_confirmation);
+    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-2"));
+    assert_ne!(state.pending_confirmation_entry_idx, Some(first_idx));
     assert!(
-        state.chat_history[first_idx]
+        state.chat_history[state.pending_confirmation_entry_idx.expect("queued entry")]
             .confirmation
             .as_ref()
             .expect("确认卡")
             .outcome
             .is_none(),
-        "重新激活的卡必须恢复成可回答状态"
+        "激活后的卡必须恢复成可回答状态"
     );
 }
 
@@ -1879,7 +1876,7 @@ async fn a_new_confirmation_never_retargets_a_pending_card() {
 /// 那些门禁就永远等不到答复 —— 整轮卡在 "Canoodling..."。
 #[tokio::test]
 async fn concurrent_confirmations_are_asked_in_turn_without_losing_any() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
 
     for i in 1..=3 {
@@ -1897,11 +1894,11 @@ async fn concurrent_confirmations_are_asked_in_turn_without_losing_any() {
         .unwrap();
     }
 
-    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-3"));
+    assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-1"));
     assert_eq!(
         state.pending_confirmation_queue.len(),
         2,
-        "另外两张必须排队，不能丢"
+        "后续请求必须按 FIFO 排队，不能丢"
     );
 
     let mut asked = Vec::new();
@@ -1912,8 +1909,8 @@ async fn concurrent_confirmations_are_asked_in_turn_without_losing_any() {
 
     assert_eq!(
         asked,
-        vec!["corr-3", "corr-2", "corr-1"],
-        "最近被顶下去的那张先答，三张都要轮到"
+        vec!["corr-1", "corr-2", "corr-3"],
+        "当前确认先处理，随后按到达顺序处理排队项"
     );
     assert!(state.pending_confirmation_queue.is_empty());
 }
@@ -1922,7 +1919,7 @@ async fn concurrent_confirmations_are_asked_in_turn_without_losing_any() {
 /// 不能再被激活成一张没有接收者的卡。
 #[tokio::test]
 async fn a_tool_result_removes_its_queued_confirmation() {
-    let mut state = ChatState::new();
+    let mut state = ChatState::test_fixture();
     let (agent_tx, _agent_rx) = mpsc::channel(1);
 
     for i in 1..=2 {
@@ -1945,7 +1942,7 @@ async fn a_tool_result_removes_its_queued_confirmation() {
         &mut state,
         1,
         StarToolCall {
-            id: "call-1".to_string(),
+            id: "call-2".to_string(),
             ..agent_tool_call()
         },
         ToolResult {
@@ -1963,9 +1960,85 @@ async fn a_tool_result_removes_its_queued_confirmation() {
     );
     assert_eq!(
         state.pending_tool_call_id.as_deref(),
-        Some("corr-2"),
-        "当前这张不受影响"
+        Some("corr-1"),
+        "排队项的工具结果不能替换当前正在等待回答的请求"
     );
+}
+
+#[tokio::test]
+async fn persistence_receipt_updates_only_the_matching_confirmation_card() {
+    let mut state = ChatState::test_fixture();
+    let (tx, _rx) = mpsc::channel(4);
+    for (correlation_id, origin_id) in [
+        ("corr-active", "call-active"),
+        ("corr-queued", "call-queued"),
+    ] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolConfirmationRequest {
+                message_id: 7,
+                tool_call_id: correlation_id.to_string(),
+                originating_tool_call_id: Some(origin_id.to_string()),
+                confirmation: shell_confirmation("echo approval"),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+    }
+    let queued_idx = state.pending_confirmation_queue.front().unwrap().entry_idx;
+    assert_eq!(
+        state.chat_list_state.selected(),
+        state.pending_confirmation_entry_idx,
+        "排队卡不应抢占 active 卡的视口焦点"
+    );
+
+    let answered_idx = state.pending_confirmation_entry_idx.unwrap();
+    state.chat_history[answered_idx]
+        .confirmation
+        .as_mut()
+        .unwrap()
+        .outcome = Some(crate::core::i18n::t1("ui.confirm.outcome.persisting"));
+    state.clear_pending_confirmation();
+    assert_eq!(state.pending_confirmation_entry_idx, Some(queued_idx));
+    for persisted in [true, false] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ToolApprovalRecorded {
+                correlation_id: "corr-active".to_string(),
+                originating_tool_call_id: Some("call-active".to_string()),
+                persisted,
+                requested_persist: true,
+                error: (!persisted).then(|| "disk is read-only".to_string()),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.pending_tool_call_id.as_deref(), Some("corr-queued"));
+        assert!(state.chat_history[queued_idx]
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .outcome
+            .is_none());
+        let outcome = state.chat_history[answered_idx]
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .outcome
+            .as_ref()
+            .unwrap();
+        if persisted {
+            assert_eq!(
+                outcome,
+                &crate::core::i18n::t1("ui.confirm.outcome.persisted")
+            );
+        } else {
+            assert!(outcome.contains("disk is read-only"));
+            assert!(!outcome.contains(&crate::core::i18n::t1("ui.confirm.outcome.persisted")));
+        }
+    }
 }
 
 /// 截图回归：审批不是成功，失败输出也不能只剩退出码。
@@ -3173,4 +3246,284 @@ async fn auto_compact_feedback_is_localized_and_keeps_usage() {
         .collect();
     assert!(!footer.contains("[COMPACTED]"));
     assert_eq!(state.token_usage.as_ref().unwrap().total_tokens, 110);
+}
+
+#[tokio::test]
+async fn phase_accuracy_reasoning_clears_analysis_and_retry_only_on_visible_output() {
+    let (tx, _rx) = mpsc::channel(4);
+    for status in [
+        "Status: Analyzing task complexity...",
+        "Status: Provider Error — retrying now (1/3)",
+    ] {
+        let mut state = ChatState::test_fixture();
+        state.active_message_id = Some(42);
+        state.stream_targets.insert(42, state.chat_history.len());
+        state.current_status_line = Some(status.into());
+        let waiting_since = Instant::now();
+        state.model_wait_started_at = Some(waiting_since);
+        let before = state.chat_history.len();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ReasoningDelta {
+                message_id: 42,
+                content: " \n".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.current_status_line.as_deref(), Some(status));
+        assert_eq!(state.model_wait_started_at, Some(waiting_since));
+        assert_eq!(state.chat_history.len(), before);
+
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ReasoningDelta {
+                message_id: 42,
+                content: "Compare the branches.".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.current_status_line.is_none(), "{status}");
+        assert!(state.model_wait_started_at.is_none());
+        assert_eq!(
+            state
+                .chat_history
+                .last()
+                .unwrap()
+                .reasoning_content
+                .as_deref(),
+            Some("Compare the branches.")
+        );
+    }
+}
+
+#[tokio::test]
+async fn phase_accuracy_reasoning_preserves_approval_and_error_status() {
+    let (tx, _rx) = mpsc::channel(4);
+    for (status, awaiting, failed) in [
+        ("Waiting for approval", true, false),
+        ("Error: provider unavailable", false, true),
+    ] {
+        let mut state = ChatState::test_fixture();
+        state.active_message_id = Some(42);
+        state.is_awaiting_confirmation = awaiting;
+        state.last_turn_failed = failed;
+        state.stream_targets.insert(42, state.chat_history.len());
+        state.current_status_line = Some(status.into());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::ReasoningDelta {
+                message_id: 42,
+                content: "Late reasoning".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.current_status_line.as_deref(), Some(status));
+    }
+}
+
+#[tokio::test]
+async fn phase_accuracy_model_traces_replace_analysis_and_follow_request_boundaries() {
+    let (tx, _rx) = mpsc::channel(4);
+    let mut state = ChatState::test_fixture();
+    state.active_message_id = Some(42);
+    state.is_processing = true;
+    state.current_status_line = Some("Status: Analyzing task complexity...".into());
+    for (event, expected, waiting) in [
+        (
+            "model_request_preparing",
+            Some(i18n::t1("ui.status.model_prepare")),
+            false,
+        ),
+        (
+            "model_request_started",
+            Some(i18n::t1("ui.status.model_wait_no_ms")),
+            true,
+        ),
+        ("model_first_chunk", None, false),
+    ] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Trace {
+                message_id: 42,
+                event: event.into(),
+                payload: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.current_status_line.as_deref(),
+            expected.as_deref(),
+            "{event}"
+        );
+        assert_eq!(state.model_wait_started_at.is_some(), waiting, "{event}");
+        let spinner: String =
+            crate::ui::components::status_line::processing_spinner_line(&state, 180)
+                .iter()
+                .flat_map(|line| &line.spans)
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(!spinner.contains("Analyzing task complexity"), "{spinner}");
+        for ready in [
+            i18n::t1("ui.status.model_ready").replace("{ms}", "0"),
+            i18n::t1("ui.status.model_ready_no_ms"),
+        ] {
+            assert!(
+                !spinner.contains(ready.trim_start_matches("Status: ")),
+                "首片段通知不能成为常驻阶段：{spinner}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn phase_accuracy_first_chunk_preserves_unrelated_current_status() {
+    let (tx, _rx) = mpsc::channel(4);
+    for status in ["Running Read", "Error: tool failed"] {
+        let mut state = ChatState::test_fixture();
+        state.active_message_id = Some(42);
+        state.current_status_line = Some(status.into());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Trace {
+                message_id: 42,
+                event: "model_first_chunk".into(),
+                payload: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.current_status_line.as_deref(), Some(status));
+    }
+}
+
+#[tokio::test]
+async fn phase_accuracy_preparing_clears_previous_request_wait_clock() {
+    let (tx, _rx) = mpsc::channel(4);
+    let mut state = ChatState::test_fixture();
+    state.active_message_id = Some(42);
+    state.model_wait_started_at = Some(Instant::now());
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Trace {
+            message_id: 42,
+            event: "model_request_preparing".into(),
+            payload: serde_json::json!({}),
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert!(state.model_wait_started_at.is_none());
+}
+
+#[tokio::test]
+async fn phase_accuracy_late_reasoning_cannot_mutate_the_current_turn() {
+    let (tx, _rx) = mpsc::channel(4);
+    let mut state = ChatState::test_fixture();
+    state.active_message_id = Some(43);
+    state.stream_targets.insert(42, state.chat_history.len());
+    state.current_status_line = Some("Status: Analyzing task complexity...".into());
+    let last_token = state.last_token_time;
+    let before = state.chat_history.len();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::ReasoningDelta {
+            message_id: 42,
+            content: "Old turn reasoning".into(),
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state.current_status_line.as_deref(),
+        Some("Status: Analyzing task complexity...")
+    );
+    assert_eq!(state.last_token_time, last_token);
+    assert_eq!(state.chat_history.len(), before);
+}
+
+#[tokio::test]
+async fn phase_accuracy_model_traces_preserve_newer_turn_approval_and_errors() {
+    let (tx, _rx) = mpsc::channel(4);
+    for (active_id, awaiting, failed, completed) in [
+        (43, false, false, false),
+        (42, true, false, false),
+        (42, false, true, false),
+        (42, false, false, true),
+    ] {
+        for event in [
+            "model_request_preparing",
+            "model_request_started",
+            "provider_request_started",
+            "provider_response_headers",
+            "provider_first_byte",
+            "model_first_chunk",
+            "agent_status",
+        ] {
+            let mut state = ChatState::test_fixture();
+            state.active_message_id = Some(active_id);
+            state.is_awaiting_confirmation = awaiting;
+            state.last_turn_failed = failed;
+            if completed {
+                state.complete_task_message_ids.insert(42);
+            }
+            state.current_status_line = Some("Keep the current status".into());
+            let waiting_since = Instant::now();
+            state.model_wait_started_at = Some(waiting_since);
+            let last_token = state.last_token_time;
+            handle_stream_update(
+                &mut state,
+                StreamMessage::Trace {
+                    message_id: 42,
+                    event: event.into(),
+                    payload: serde_json::json!({"message": "Analyzing task complexity..."}),
+                },
+                &tx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state.current_status_line.as_deref(),
+                Some("Keep the current status"),
+                "{event}, active={active_id}"
+            );
+            assert_eq!(state.model_wait_started_at, Some(waiting_since), "{event}");
+            assert_eq!(state.last_token_time, last_token, "{event}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn phase_accuracy_empty_agent_status_does_not_advance_activity() {
+    let (tx, _rx) = mpsc::channel(4);
+    let mut state = ChatState::test_fixture();
+    state.active_message_id = Some(42);
+    state.last_token_time = None;
+    state.current_status_line = Some("Status: preparing model request".into());
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Trace {
+            message_id: 42,
+            event: "agent_status".into(),
+            payload: serde_json::json!({"message": " \n"}),
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    assert!(state.last_token_time.is_none());
+    assert_eq!(
+        state.current_status_line.as_deref(),
+        Some("Status: preparing model request")
+    );
 }

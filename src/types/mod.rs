@@ -152,6 +152,9 @@ pub struct ChatEntry {
     // 工具确认信息（用于内联确认卡片）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<ToolConfirmation>,
+    /// 确认卡对应的 bus correlation id，用于匹配迟到的授权保存回执。
+    #[serde(skip)]
+    pub confirmation_correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Frozen elapsed ms when reasoning finished — prevents timer from ticking
@@ -258,6 +261,7 @@ impl ChatEntry {
             tool_result: None,
             is_streaming: None,
             confirmation: None,
+            confirmation_correlation_id: None,
             reasoning_content: None,
             reasoning_finished_elapsed_ms: None,
             reasoning_started_at: None,

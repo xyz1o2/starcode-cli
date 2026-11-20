@@ -99,7 +99,10 @@ pub fn get_items(mode: &PaletteMode, state: &ChatState) -> Vec<PaletteItem> {
         // 过滤词由 `state.palette_filter` 提供（`get_items` 没有 query 参数，
         // 所以这里只出全部条目，真正的过滤统一在 `get_search_items` /
         // `palette_item_matches_query` 里做，和其它模式完全一致）。
-        PaletteMode::Command => crate::commands::system::command_palette_items("/"),
+        PaletteMode::Command => crate::commands::system::command_palette_items_with_plugins(
+            "/",
+            state.plugin_commands.candidates(),
+        ),
         PaletteMode::Session => get_session_palette_items(),
         PaletteMode::System => get_system_palette_items(),
         PaletteMode::Agent => get_agent_palette_items(),

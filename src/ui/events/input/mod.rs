@@ -111,6 +111,10 @@ pub(crate) fn restore_queued_messages_to_input(state: &mut ChatState) -> bool {
         return false;
     }
     let mut inputs: Vec<_> = state.pending_user_messages.drain(..).collect();
+    // 取回队列会把当前输入重组为新草稿，不能让旧历史导航状态在下一次
+    // ↓ 时把这个新内容覆盖回历史进入前的快照。
+    state.history_index = None;
+    state.history_input_snapshot = None;
     // 图片路径可能已经失效；即使展开失败，也必须把当前草稿和它的
     // paste segment 原样保住，不能因为取回队列而静默丢掉附件引用。
     let current_raw = state.textarea.lines().join("\n");
@@ -1621,7 +1625,6 @@ pub async fn handle_key_event(
         }
         KeyCode::Up => {
             let cursor_row = state.textarea.cursor().0;
-            let input_is_empty = state.input.trim().is_empty();
 
             if cursor_row == 0 && !state.pending_user_messages.is_empty() {
                 // 队列优先于命令历史（对标 PromptInput 的 handleHistoryUp）：
@@ -1633,14 +1636,17 @@ pub async fn handle_key_event(
                     n,
                     if n == 1 { "" } else { "s" }
                 ));
-            } else if cursor_row == 0 && (input_is_empty || state.history_index.is_some()) {
-                // Command history navigation: Up when cursor is on first line and input is
-                // empty or already in history mode
+            } else if cursor_row == 0 {
+                // 首行继续向上进入历史；先保留完整草稿，向下退出时恢复正文和附件。
                 if !state.command_history.is_empty() {
                     let idx = match state.history_index {
                         Some(i) => i.saturating_add(1),
                         None => {
-                            state.history_input_snapshot = state.prepared_input().ok();
+                            let Ok(snapshot) = state.prepared_input() else {
+                                // 附件或粘贴内容无法还原时，不能覆盖尚未保存的草稿。
+                                return Ok(());
+                            };
+                            state.history_input_snapshot = Some(snapshot);
                             0
                         }
                     };
@@ -2100,6 +2106,67 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn command_palette_fills_textarea_and_clears_stale_completion() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("existing prompt");
+        state.open_palette(PaletteMode::Command);
+        state.palette_filter = "/resume".into();
+        let (tx, mut rx) = mpsc::channel(4);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "/resume ");
+        assert_eq!(state.textarea.lines().join("\n"), state.input);
+        assert!(!state.is_palette_open());
+        assert!(state.command_hints.is_empty());
+        assert!(rx.try_recv().is_err(), "filling a command is not execution");
+    }
+
+    #[tokio::test]
+    async fn dynamic_plugin_completion_accepts_real_enter_and_tab_without_execution() {
+        for key in [KeyCode::Enter, KeyCode::Tab] {
+            let mut state = ChatState::test_fixture();
+            let (tx, mut rx) = mpsc::channel(16);
+            state.plugin_commands.seed_for_tests(vec![
+                crate::commands::system::PluginCommandCandidate {
+                    name: "fixture-check".into(),
+                    description: "Inspect local metadata".into(),
+                },
+            ]);
+            state.set_input_text("/fixture-c");
+            crate::ui::services::suggestions::on_input_changed(&mut state);
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(key, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.input.trim(), "/fixture-check");
+            assert_eq!(state.textarea.lines().join("\n"), state.input);
+            assert!(state.command_hints.is_empty());
+            assert!(
+                rx.try_recv().is_err(),
+                "completion must not invoke the agent"
+            );
+            assert!(
+                !crate::ui::services::suggestions::handle_enter(&mut state),
+                "a second Enter must fall through to normal command dispatch"
+            );
+            state.set_input_text("/fixture-check --path \"a b\"");
+            crate::ui::services::suggestions::on_input_changed(&mut state);
+            assert!(!crate::ui::services::suggestions::handle_tab(&mut state));
+            assert_eq!(state.input, "/fixture-check --path \"a b\"");
+        }
+    }
+
     /// 用真实按键覆盖清空后的同步和命令补全，不直接给 input 赋期望值。
     #[tokio::test]
     async fn slash_completion_recovers_after_deleting_long_input() {
@@ -2371,6 +2438,118 @@ mod tests {
             assert_eq!(state.input, expected);
             assert_eq!((state.scroll, state.scroll_velocity), scroll_before);
         }
+    }
+
+    #[tokio::test]
+    async fn history_navigation_restores_nonempty_multiline_draft() {
+        let mut state = ChatState::test_fixture();
+        let draft = "first draft line\nsecond draft line";
+        state.set_input_text(draft);
+        state.textarea.move_cursor(tui_textarea::CursorMove::Top);
+        state.command_history = [crate::types::UserInput::from("previous question")].into();
+        let scroll_before = (state.scroll, state.scroll_velocity);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.input, "previous question",
+            "必须确实进入历史，而非原地上下移动"
+        );
+        assert_eq!(state.history_index, Some(0));
+        assert_eq!(state.textarea.lines().join("\n"), "previous question");
+        assert_eq!(state.input_line_count, 1);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, draft);
+        assert_eq!(state.textarea.lines().join("\n"), draft);
+        assert_eq!(state.input_line_count, 2);
+        assert_eq!(state.history_index, None);
+        assert_eq!((state.scroll, state.scroll_velocity), scroll_before);
+        assert!(rx.try_recv().is_err(), "历史浏览不得提交消息");
+    }
+
+    #[tokio::test]
+    async fn history_navigation_restores_literal_draft_and_image() {
+        let mut state = ChatState::test_fixture();
+        state.set_user_input(crate::types::UserInput {
+            text: "/keep this literal [Image]".into(),
+            intent: crate::types::InputIntent::Literal,
+            images: vec![crate::types::ImageAttachment {
+                media_type: "image/png".into(),
+                data: "Zml4dHVyZQ==".into(),
+                width: 1,
+                height: 1,
+            }],
+        });
+        let before = state.prepared_input().unwrap();
+        state.command_history = [crate::types::UserInput::from("previous question")].into();
+        let (tx, mut rx) = mpsc::channel(16);
+        for (key, expected) in [
+            (KeyCode::Up, "previous question"),
+            (KeyCode::Down, before.text.as_str()),
+        ] {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(key, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(state.prepared_input().unwrap().text, expected);
+        }
+        let restored = state.prepared_input().unwrap();
+        assert_eq!(restored.intent, before.intent);
+        assert_eq!(restored.images.len(), 1);
+        assert_eq!(restored.images[0].data, before.images[0].data);
+        assert_eq!(state.paste_segments.len(), 1);
+        assert!(state.history_input_snapshot.is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn history_up_keeps_multiline_cursor_motion_and_empty_history_safe() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("first draft line\nsecond draft line");
+        state.command_history = [crate::types::UserInput::from("previous question")].into();
+        assert_eq!(state.textarea.cursor().0, 1);
+        let (tx, _rx) = mpsc::channel(16);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.textarea.cursor().0, 0);
+        assert_eq!(state.input, "first draft line\nsecond draft line");
+        assert_eq!(state.history_index, None);
+        state.command_history.clear();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "first draft line\nsecond draft line");
+        assert!(state.history_input_snapshot.is_none());
     }
 
     #[test]
@@ -3799,6 +3978,55 @@ mod tests {
             vec!["/chat resume saved-session"]
         );
         assert!(agent_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn recalling_queue_exits_history_without_losing_recalled_input() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("original draft");
+        state.command_history = [crate::types::UserInput::from("previous question")].into();
+        let (tx, mut rx) = mpsc::channel(16);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "previous question");
+        assert_eq!(state.history_index, Some(0));
+
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput::from("queued"));
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "queued\nprevious question");
+        assert!(state.pending_user_messages.is_empty());
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.input, "queued\nprevious question",
+            "Down 不得用旧历史草稿覆盖取回的队列"
+        );
+        assert_eq!(state.textarea.lines().join("\n"), state.input);
+        assert_eq!(state.input_line_count, 2);
+        assert!(state.history_index.is_none());
+        assert!(state.history_input_snapshot.is_none());
+        assert!(rx.try_recv().is_err());
     }
 
     /// 排队的输入按入队顺序拼回输入框，队列随之清空。

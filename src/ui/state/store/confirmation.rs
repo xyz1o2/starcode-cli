@@ -38,6 +38,7 @@ impl ChatState {
         self.pending_question_index = 0;
         self.pending_question_answers.clear();
         self.chat_list_state.select(Some(queued.entry_idx));
+        self.auto_follow = true;
         true
     }
 
@@ -50,9 +51,7 @@ impl ChatState {
         for item in queued {
             if let Some(entry) = self.chat_history.get_mut(item.entry_idx) {
                 if let Some(confirmation) = entry.confirmation.as_mut() {
-                    if confirmation.outcome.is_none() {
-                        confirmation.outcome = Some(reason.to_string());
-                    }
+                    confirmation.outcome = Some(reason.to_string());
                 }
             }
             self.rendered_cache.remove(&item.entry_idx);
@@ -74,10 +73,8 @@ impl ChatState {
         for idx in removed {
             if let Some(entry) = self.chat_history.get_mut(idx) {
                 if let Some(confirmation) = entry.confirmation.as_mut() {
-                    if confirmation.outcome.is_none() {
-                        confirmation.outcome =
-                            Some(crate::core::i18n::t1("ui.confirm.cancelled_tool_done"));
-                    }
+                    confirmation.outcome =
+                        Some(crate::core::i18n::t1("ui.confirm.cancelled_tool_done"));
                 }
             }
             self.rendered_cache.remove(&idx);
@@ -98,6 +95,8 @@ impl ChatState {
         self.pending_question_selections.clear();
         self.pending_question_index = 0;
         self.pending_question_answers.clear();
-        self.activate_next_queued_confirmation();
+        if !self.activate_next_queued_confirmation() {
+            self.auto_follow = true;
+        }
     }
 }

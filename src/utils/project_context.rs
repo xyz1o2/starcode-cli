@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 const PROJECT_CONTEXT_CACHE_TTL_SECS: u64 = 30;
 /// 注入到 system prompt 的 CLAUDE.md / STAR.md 最大字符数
@@ -25,20 +25,29 @@ const CONTEXT_FILE_LEGACY: &str = ".star/STAR.md";
 /// 建议加进 .gitignore。
 const CONTEXT_FILE_OVERRIDE: &str = "AGENTS.override.md";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileFingerprint {
+    modified_at: Option<SystemTime>,
+    file_len: u64,
+}
+
+type ContextFileFingerprint = (PathBuf, Option<FileFingerprint>);
+
 #[derive(Clone)]
 struct ProjectContextCacheEntry {
     source_path: Option<PathBuf>,
-    modified_at_unix_ms: Option<u128>,
-    file_len: u64,
+    max_chars: usize,
+    fingerprint: Option<FileFingerprint>,
     checked_at: Instant,
     content: Option<String>,
 }
 
-/// 多级上下文缓存条目：跟踪多个文件的指纹
 #[derive(Clone)]
 struct MultiLevelCacheEntry {
-    /// (path, modified_at_ms, file_len) 对每个级别
-    file_fingerprints: Vec<(PathBuf, Option<u128>, u64)>,
+    source_paths: Vec<PathBuf>,
+    max_chars: usize,
+    // 缺失的导入目标也必须记录，创建文件后才能使缓存失效。
+    file_fingerprints: Vec<ContextFileFingerprint>,
     checked_at: Instant,
     merged_content: Option<String>,
 }
@@ -69,14 +78,18 @@ fn project_context_cache_ttl() -> Duration {
     )
 }
 
-fn file_fingerprint(path: &Path) -> Option<(Option<u128>, u64)> {
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
-    let modified_at_unix_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis());
-    Some((modified_at_unix_ms, metadata.len()))
+    Some(FileFingerprint {
+        modified_at: metadata.modified().ok(),
+        file_len: metadata.len(),
+    })
+}
+
+fn context_files_are_fresh(fingerprints: &[ContextFileFingerprint]) -> bool {
+    fingerprints
+        .iter()
+        .all(|(path, fingerprint)| file_fingerprint(path) == *fingerprint)
 }
 
 /// 在目录中查找第一个匹配的上下文文件
@@ -127,7 +140,7 @@ fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
         // 如果目录有上下文文件且父目录没有，也视为项目根
         if find_context_file_in_dir(current).is_some() {
             let parent = current.parent();
-            let parent_has_context = parent.and_then(|p| find_context_file_in_dir(p)).is_some();
+            let parent_has_context = parent.and_then(find_context_file_in_dir).is_some();
             if !parent_has_context {
                 return Some(current.to_path_buf());
             }
@@ -210,10 +223,14 @@ fn collect_context_files_in_dir(dir: &Path, include_agents: bool) -> Vec<PathBuf
 /// 旧实现把 `collect_context_files` 的返回顺序写成「从高到低」但循环实际是
 /// CWD 优先，等于反着来。
 fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
+    collect_context_files_with_home(start_dir, dirs::home_dir().as_deref())
+}
+
+fn collect_context_files_with_home(start_dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     // 1. 用户全局上下文（最低优先级，最先加载）
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         files.extend(collect_context_files_in_dir(&home.join(".star"), true));
         // CC 的用户层。排在 ~/.star/ 之后。
         let user_claude_md = home.join(".claude").join("CLAUDE.md");
@@ -295,11 +312,22 @@ fn collect_context_files(start_dir: &Path) -> Vec<PathBuf> {
 /// - 环检测：同一次展开里已访问过的文件不再展开（避免 a→b→a 死循环）；
 /// - 目标不存在 / 读不出来：保留原行（CC 的失败方向也是「当没看见」，
 ///   不应让一行坏 import 毁掉整个 CLAUDE.md）。
+#[cfg(test)]
 fn expand_imports(
     content: &str,
     base_dir: &Path,
     seen: &mut HashSet<PathBuf>,
     depth: usize,
+) -> String {
+    expand_imports_with_fingerprints(content, base_dir, seen, depth, &mut Vec::new())
+}
+
+fn expand_imports_with_fingerprints(
+    content: &str,
+    base_dir: &Path,
+    seen: &mut HashSet<PathBuf>,
+    depth: usize,
+    fingerprints: &mut Vec<ContextFileFingerprint>,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     let mut in_fence = false;
@@ -323,7 +351,7 @@ fn expand_imports(
             continue;
         };
 
-        let resolved = resolve_import_path(base_dir, &target);
+        let resolved = resolve_import_path(base_dir, target);
         let stop =
             depth >= MAX_IMPORT_DEPTH || seen.contains(&resolved) || !seen.insert(resolved.clone());
         // seen.insert 已把当前文件记下；stop 的三种情况都原样保留该行。
@@ -333,10 +361,17 @@ fn expand_imports(
             continue;
         }
 
+        fingerprints.push((resolved.clone(), file_fingerprint(&resolved)));
         match std::fs::read_to_string(&resolved) {
             Ok(imported) => {
-                let import_dir = resolved.parent().unwrap_or(base_dir).to_path_buf();
-                let expanded = expand_imports(&imported, &import_dir, seen, depth + 1);
+                let import_dir = resolved.parent().unwrap_or(base_dir);
+                let expanded = expand_imports_with_fingerprints(
+                    &imported,
+                    import_dir,
+                    seen,
+                    depth + 1,
+                    fingerprints,
+                );
                 // 展开体带一个提醒标签，模型看得见内容来源。
                 out.push_str(&format!(
                     "[imported from {}]\n{}\n[/imported from {}]",
@@ -371,7 +406,7 @@ fn import_target_of(line: &str) -> Option<&str> {
     }
     // 路径部分到第一个空白为止 —— CC 的 `@import` 没有行内注释语法，
     // `@path 之后的多余内容` 取第一个 token，其余原样保留。
-    Some(rest.split_whitespace().next()?)
+    rest.split_whitespace().next()
 }
 
 fn resolve_import_path(base_dir: &Path, target: &str) -> PathBuf {
@@ -390,17 +425,26 @@ fn resolve_import_path(base_dir: &Path, target: &str) -> PathBuf {
 /// - 顺序是「文件系统根 → CWD」，所以**越晚出现的（越靠近 CWD）越优先**
 /// - 总字符数受 STAR_PROJECT_CONTEXT_MAX_CHARS 限制
 /// - 每段先过 `@import` 展开（见 `expand_imports`）
+#[cfg(test)]
 fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
+    load_context_files_with_fingerprints(files, project_context_max_chars(), &mut Vec::new())
+}
+
+fn load_context_files_with_fingerprints(
+    files: &[PathBuf],
+    max_chars: usize,
+    fingerprints: &mut Vec<ContextFileFingerprint>,
+) -> Option<String> {
     if files.is_empty() {
         return None;
     }
 
-    let max_chars = project_context_max_chars();
     let mut merged = String::new();
     let mut total_chars = 0usize;
     let separator = "\n\n---\n\n";
 
     for (i, path) in files.iter().enumerate() {
+        fingerprints.push((path.clone(), file_fingerprint(path)));
         let raw = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(_) => continue,
@@ -412,7 +456,13 @@ fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        let expanded = expand_imports(&raw, &base_dir, &mut HashSet::from([path.clone()]), 0);
+        let expanded = expand_imports_with_fingerprints(
+            &raw,
+            &base_dir,
+            &mut HashSet::from([path.clone()]),
+            0,
+            fingerprints,
+        );
 
         let trimmed = expanded.trim();
         if trimmed.is_empty() {
@@ -463,7 +513,6 @@ fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
                 // 至少需要 100 字符才值得添加
                 if !merged.is_empty() {
                     merged.push_str(separator);
-                    total_chars += separator.len();
                 }
                 let safe_end = section
                     .char_indices()
@@ -494,8 +543,7 @@ fn load_and_merge_context_files(files: &[PathBuf]) -> Option<String> {
 }
 
 /// 截断过长的项目上下文，保留前 N 字符
-fn truncate_project_context(content: String) -> String {
-    let max_chars = project_context_max_chars();
+fn truncate_project_context(content: String, max_chars: usize) -> String {
     if content.len() <= max_chars {
         return content;
     }
@@ -514,60 +562,58 @@ fn truncate_project_context(content: String) -> String {
 
 /// 读取项目上下文文件内容（单文件模式，保持向后兼容）
 pub fn load_project_context(start_dir: &Path) -> Option<String> {
+    load_single_context_file(
+        start_dir,
+        find_project_context_file(start_dir),
+        project_context_max_chars(),
+        project_context_cache(),
+    )
+}
+
+fn load_single_context_file(
+    start_dir: &Path,
+    source_path: Option<PathBuf>,
+    max_chars: usize,
+    cache: &Mutex<HashMap<PathBuf, ProjectContextCacheEntry>>,
+) -> Option<String> {
     let cache_key = start_dir.to_path_buf();
     let ttl = project_context_cache_ttl();
+    let fingerprint = source_path.as_deref().and_then(file_fingerprint);
+    let cached = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned());
 
-    if let Ok(cache) = project_context_cache().lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.checked_at.elapsed() < ttl {
-                match &entry.source_path {
-                    Some(source_path) => {
-                        if let Some((modified_at_unix_ms, file_len)) = file_fingerprint(source_path)
-                        {
-                            if entry.modified_at_unix_ms == modified_at_unix_ms
-                                && entry.file_len == file_len
-                            {
-                                return entry.content.clone();
-                            }
-                        }
-                    }
-                    None => return None,
-                }
-            }
-        }
-    }
-
-    let source_path = find_project_context_file(start_dir);
-    let mut modified_at_unix_ms = None;
-    let mut file_len = 0;
-    let mut content = None;
-
-    if let Some(path) = source_path.as_ref() {
-        if let Some((fingerprint_modified_at_unix_ms, fingerprint_file_len)) =
-            file_fingerprint(path)
+    if let Some(entry) = cached {
+        if entry.checked_at.elapsed() < ttl
+            && entry.source_path == source_path
+            && entry.max_chars == max_chars
+            && entry.fingerprint == fingerprint
         {
-            modified_at_unix_ms = fingerprint_modified_at_unix_ms;
-            file_len = fingerprint_file_len;
-        }
-
-        if let Ok(raw) = std::fs::read_to_string(path) {
-            if !raw.trim().is_empty() {
-                content = Some(truncate_project_context(raw));
-            }
+            return entry.content;
         }
     }
 
-    if let Ok(mut cache) = project_context_cache().lock() {
-        cache.insert(
-            cache_key,
-            ProjectContextCacheEntry {
-                source_path,
-                modified_at_unix_ms,
-                file_len,
-                checked_at: Instant::now(),
-                content: content.clone(),
-            },
-        );
+    let content = source_path
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| truncate_project_context(raw, max_chars));
+
+    // 指纹在读取前采集；读取期间发生变化时不缓存这次结果。
+    if source_path.as_deref().and_then(file_fingerprint) == fingerprint {
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(
+                cache_key,
+                ProjectContextCacheEntry {
+                    source_path,
+                    max_chars,
+                    fingerprint,
+                    checked_at: Instant::now(),
+                    content: content.clone(),
+                },
+            );
+        }
     }
 
     content
@@ -582,59 +628,53 @@ pub fn load_project_context(start_dir: &Path) -> Option<String> {
 ///
 /// 后面的级别优先级更高，内容会被合并注入到 system prompt。
 pub fn load_merged_project_context(start_dir: &Path) -> Option<String> {
+    load_merged_context_files(
+        start_dir,
+        collect_context_files(start_dir),
+        project_context_max_chars(),
+        multi_level_cache(),
+    )
+}
+
+fn load_merged_context_files(
+    start_dir: &Path,
+    files: Vec<PathBuf>,
+    max_chars: usize,
+    cache: &Mutex<HashMap<PathBuf, MultiLevelCacheEntry>>,
+) -> Option<String> {
     let cache_key = start_dir.to_path_buf();
     let ttl = project_context_cache_ttl();
+    let cached = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned());
 
-    // 检查多级缓存
-    if let Ok(cache) = multi_level_cache().lock() {
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.checked_at.elapsed() < ttl {
-                // 验证所有文件指纹是否变化
-                let mut all_fresh = true;
-                for (path, cached_ms, cached_len) in &entry.file_fingerprints {
-                    if let Some((current_ms, current_len)) = file_fingerprint(path) {
-                        if current_ms != *cached_ms || current_len != *cached_len {
-                            all_fresh = false;
-                            break;
-                        }
-                    } else {
-                        // 文件被删除
-                        all_fresh = false;
-                        break;
-                    }
-                }
-                if all_fresh {
-                    return entry.merged_content.clone();
-                }
-            }
+    if let Some(entry) = cached {
+        if entry.checked_at.elapsed() < ttl
+            && entry.source_paths == files
+            && entry.max_chars == max_chars
+            && context_files_are_fresh(&entry.file_fingerprints)
+        {
+            return entry.merged_content;
         }
     }
 
-    // 收集所有级别的上下文文件
-    let files = collect_context_files(start_dir);
+    let mut fingerprints = Vec::new();
+    let merged = load_context_files_with_fingerprints(&files, max_chars, &mut fingerprints);
 
-    // 计算每个文件的指纹
-    let fingerprints: Vec<(PathBuf, Option<u128>, u64)> = files
-        .iter()
-        .map(|p| {
-            let (ms, len) = file_fingerprint(p).unwrap_or((None, 0));
-            (p.clone(), ms, len)
-        })
-        .collect();
-
-    // 合并内容
-    let merged = load_and_merge_context_files(&files);
-
-    // 更新缓存
-    if let Ok(mut cache) = multi_level_cache().lock() {
-        cache.insert(
-            cache_key,
-            MultiLevelCacheEntry {
-                file_fingerprints: fingerprints,
-                checked_at: Instant::now(),
-                merged_content: merged.clone(),
-            },
-        );
+    if context_files_are_fresh(&fingerprints) {
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(
+                cache_key,
+                MultiLevelCacheEntry {
+                    source_paths: files,
+                    max_chars,
+                    file_fingerprints: fingerprints,
+                    checked_at: Instant::now(),
+                    merged_content: merged.clone(),
+                },
+            );
+        }
     }
 
     merged
@@ -868,6 +908,275 @@ mod tests {
             "坏 import 不截断后续内容：{expanded}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct ContextFixture {
+        dir: tempfile::TempDir,
+        cache: Mutex<HashMap<PathBuf, MultiLevelCacheEntry>>,
+        single_file_cache: Mutex<HashMap<PathBuf, ProjectContextCacheEntry>>,
+    }
+
+    impl ContextFixture {
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn load(&self) -> Option<String> {
+            self.load_with_budget(DEFAULT_PROJECT_CONTEXT_MAX_CHARS)
+        }
+
+        fn load_with_budget(&self, max_chars: usize) -> Option<String> {
+            load_merged_context_files(
+                self.path(),
+                collect_context_files_with_home(self.path(), None),
+                max_chars,
+                &self.cache,
+            )
+        }
+
+        fn load_single(&self) -> Option<String> {
+            load_single_context_file(
+                self.path(),
+                find_context_file_in_dir(self.path()),
+                DEFAULT_PROJECT_CONTEXT_MAX_CHARS,
+                &self.single_file_cache,
+            )
+        }
+    }
+
+    fn cache_fixture() -> ContextFixture {
+        let dir = tempfile::tempdir().expect("create isolated context fixture");
+        std::fs::create_dir(dir.path().join(".git")).expect("mark fixture as a project root");
+        ContextFixture {
+            dir,
+            cache: Mutex::new(HashMap::new()),
+            single_file_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn merged_cache_refreshes_when_character_budget_changes() {
+        let dir = cache_fixture();
+        let content = "x".repeat(300);
+        std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
+        let limited = dir.load_with_budget(150).unwrap();
+        assert!(
+            !limited.contains(&content),
+            "the initial budget must truncate"
+        );
+        assert_eq!(dir.load_with_budget(500).as_deref(), Some(content.as_str()));
+    }
+
+    #[test]
+    fn merged_cache_tracks_unchanged_dependencies() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "@rules.md").unwrap();
+        std::fs::write(dir.path().join("rules.md"), "UNCHANGED_IMPORT").unwrap();
+        let original = dir.load().unwrap();
+        let files = collect_context_files_with_home(dir.path(), None);
+        let entry = dir.cache.lock().unwrap()[dir.path()].clone();
+        assert_eq!(entry.source_paths, files);
+        assert!(context_files_are_fresh(&entry.file_fingerprints));
+        assert_eq!(dir.load().as_deref(), Some(original.as_str()));
+    }
+
+    #[test]
+    fn single_file_cache_refreshes_when_character_budget_changes() {
+        let dir = cache_fixture();
+        let path = dir.path().join("CLAUDE.md");
+        let content = "x".repeat(300);
+        std::fs::write(&path, &content).unwrap();
+        let cache = Mutex::new(HashMap::new());
+        let load =
+            |max_chars| load_single_context_file(dir.path(), Some(path.clone()), max_chars, &cache);
+        let limited = load(150).unwrap();
+        assert!(
+            !limited.contains(&content),
+            "the initial budget must truncate"
+        );
+        assert_eq!(load(500).as_deref(), Some(content.as_str()));
+    }
+
+    #[test]
+    fn merged_cache_refreshes_changed_import() {
+        let dir = cache_fixture();
+        let rules = dir.path().join("rules.md");
+        std::fs::write(dir.path().join("CLAUDE.md"), "@rules.md").unwrap();
+        std::fs::write(&rules, "ORIGINAL_IMPORT").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("ORIGINAL_IMPORT"), "{original}");
+
+        std::fs::write(&rules, "UPDATED_IMPORT_WITH_NEW_LENGTH").unwrap();
+        let updated = dir.load().unwrap();
+        assert!(
+            updated.contains("UPDATED_IMPORT_WITH_NEW_LENGTH"),
+            "{updated}"
+        );
+        assert!(!updated.contains("ORIGINAL_IMPORT"), "{updated}");
+    }
+
+    #[test]
+    fn merged_cache_refreshes_changed_nested_import() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "@rules.md").unwrap();
+        std::fs::write(dir.path().join("rules.md"), "@nested.md").unwrap();
+        let nested = dir.path().join("nested.md");
+        std::fs::write(&nested, "ORIGINAL_NESTED_IMPORT").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("ORIGINAL_NESTED_IMPORT"), "{original}");
+
+        std::fs::write(&nested, "UPDATED_NESTED_IMPORT_WITH_NEW_LENGTH").unwrap();
+        let updated = dir.load().unwrap();
+        assert!(
+            updated.contains("UPDATED_NESTED_IMPORT_WITH_NEW_LENGTH"),
+            "{updated}"
+        );
+        assert!(!updated.contains("ORIGINAL_NESTED_IMPORT"), "{updated}");
+    }
+
+    #[test]
+    fn merged_cache_refreshes_when_missing_import_is_created() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "@missing.md").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("@missing.md"), "{original}");
+
+        std::fs::write(dir.path().join("missing.md"), "NEWLY_CREATED_IMPORT").unwrap();
+        let updated = dir.load().unwrap();
+        assert!(updated.contains("NEWLY_CREATED_IMPORT"), "{updated}");
+    }
+
+    #[test]
+    fn merged_cache_refreshes_when_import_is_deleted() {
+        let dir = cache_fixture();
+        let rules = dir.path().join("rules.md");
+        std::fs::write(dir.path().join("CLAUDE.md"), "@rules.md").unwrap();
+        std::fs::write(&rules, "DELETED_IMPORT_CONTENT").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("DELETED_IMPORT_CONTENT"), "{original}");
+
+        std::fs::remove_file(rules).unwrap();
+        let updated = dir.load().unwrap();
+        assert!(!updated.contains("DELETED_IMPORT_CONTENT"), "{updated}");
+        assert!(updated.contains("@rules.md"), "{updated}");
+    }
+
+    #[test]
+    fn merged_cache_discovers_new_local_instructions() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "SHARED_INSTRUCTIONS").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("SHARED_INSTRUCTIONS"), "{original}");
+
+        std::fs::write(dir.path().join("CLAUDE.local.md"), "LOCAL_INSTRUCTIONS").unwrap();
+        let updated = dir.load().unwrap();
+        assert!(updated.contains("SHARED_INSTRUCTIONS"), "{updated}");
+        assert!(updated.contains("LOCAL_INSTRUCTIONS"), "{updated}");
+        assert!(
+            updated.find("SHARED_INSTRUCTIONS") < updated.find("LOCAL_INSTRUCTIONS"),
+            "local instructions must follow shared instructions: {updated}"
+        );
+    }
+
+    #[test]
+    fn merged_cache_discovers_override_instructions() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "SHADOWED_INSTRUCTIONS").unwrap();
+        let original = dir.load().unwrap();
+        assert!(original.contains("SHADOWED_INSTRUCTIONS"), "{original}");
+
+        std::fs::write(
+            dir.path().join("AGENTS.override.md"),
+            "OVERRIDE_INSTRUCTIONS",
+        )
+        .unwrap();
+        let updated = dir.load().unwrap();
+        assert!(updated.contains("OVERRIDE_INSTRUCTIONS"), "{updated}");
+        assert!(!updated.contains("SHADOWED_INSTRUCTIONS"), "{updated}");
+    }
+
+    #[test]
+    fn single_file_cache_discovers_new_instructions_after_empty_load() {
+        let dir = cache_fixture();
+        assert_eq!(dir.load_single(), None);
+        std::fs::write(dir.path().join("CLAUDE.md"), "NEW_INSTRUCTIONS").unwrap();
+        assert_eq!(dir.load_single().as_deref(), Some("NEW_INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn single_file_cache_discovers_higher_priority_instructions() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "ORIGINAL_INSTRUCTIONS").unwrap();
+        assert_eq!(dir.load_single().as_deref(), Some("ORIGINAL_INSTRUCTIONS"));
+        std::fs::write(
+            dir.path().join("AGENTS.override.md"),
+            "OVERRIDE_INSTRUCTIONS",
+        )
+        .unwrap();
+        assert_eq!(dir.load_single().as_deref(), Some("OVERRIDE_INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn merged_cache_removes_deleted_local_instructions() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "SHARED_INSTRUCTIONS").unwrap();
+        let local = dir.path().join("CLAUDE.local.md");
+        std::fs::write(&local, "LOCAL_INSTRUCTIONS").unwrap();
+        assert!(dir.load().unwrap().contains("LOCAL_INSTRUCTIONS"));
+
+        std::fs::remove_file(local).unwrap();
+        let updated = dir.load().unwrap();
+        assert!(updated.contains("SHARED_INSTRUCTIONS"), "{updated}");
+        assert!(!updated.contains("LOCAL_INSTRUCTIONS"), "{updated}");
+    }
+
+    #[test]
+    fn merged_cache_restores_shared_instructions_after_override_removal() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "SHARED_INSTRUCTIONS").unwrap();
+        let override_file = dir.path().join("AGENTS.override.md");
+        std::fs::write(&override_file, "OVERRIDE_INSTRUCTIONS").unwrap();
+        assert_eq!(dir.load().as_deref(), Some("OVERRIDE_INSTRUCTIONS"));
+
+        std::fs::remove_file(override_file).unwrap();
+        assert_eq!(dir.load().as_deref(), Some("SHARED_INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn single_file_cache_falls_back_after_override_removal() {
+        let dir = cache_fixture();
+        std::fs::write(dir.path().join("CLAUDE.md"), "SHARED_INSTRUCTIONS").unwrap();
+        let override_file = dir.path().join("AGENTS.override.md");
+        std::fs::write(&override_file, "OVERRIDE_INSTRUCTIONS").unwrap();
+        assert_eq!(dir.load_single().as_deref(), Some("OVERRIDE_INSTRUCTIONS"));
+
+        std::fs::remove_file(override_file).unwrap();
+        assert_eq!(dir.load_single().as_deref(), Some("SHARED_INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn warm_caches_match_cold_loads_when_budgets_shrink_and_grow() {
+        let dir = cache_fixture();
+        let path = dir.path().join("CLAUDE.md");
+        std::fs::write(&path, "项目规则".repeat(100)).unwrap();
+        std::fs::write(dir.path().join("CLAUDE.local.md"), "本地规则".repeat(100)).unwrap();
+
+        for max_chars in [8000, 500, 150, 101, 100, 0, 150, 8000] {
+            let files = collect_context_files_with_home(dir.path(), None);
+            let cold = load_context_files_with_fingerprints(&files, max_chars, &mut Vec::new());
+            assert_eq!(dir.load_with_budget(max_chars), cold, "budget={max_chars}");
+
+            let cold = std::fs::read_to_string(&path)
+                .ok()
+                .map(|content| truncate_project_context(content, max_chars));
+            let warm = load_single_context_file(
+                dir.path(),
+                Some(path.clone()),
+                max_chars,
+                &dir.single_file_cache,
+            );
+            assert_eq!(warm, cold, "single-file budget={max_chars}");
+        }
     }
 
     #[test]

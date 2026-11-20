@@ -10,12 +10,44 @@ pub async fn help(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
 
     // /help <command> — 打印该命令的说明与子命令；裸 /help 仍打开命令面板。
     if !args.is_empty() {
-        let message = match crate::commands::system::find_command_path(&args) {
-            Some((command, path)) => crate::commands::system::render_command_help(command, &path),
-            None => format!(
+        let unknown_command = || {
+            format!(
                 "Unknown command: `{}`.\n\nRun `/help` to browse all commands.",
                 args.join(" ")
-            ),
+            )
+        };
+        let builtin = crate::commands::system::find_command_path(&args).or_else(|| {
+            // 单个名称也遵守提交端的唯一前缀解析；多段未知路径不猜测。
+            if args.len() == 1 && !args[0].is_empty() && !args[0].chars().any(char::is_whitespace) {
+                crate::commands::system::parse_command(&format!("/{}", args[0]))
+                    .and_then(|parsed| crate::commands::system::find_command_path(&parsed.path))
+            } else {
+                None
+            }
+        });
+        let message = match builtin {
+            Some((command, path)) => crate::commands::system::render_command_help(command, &path),
+            // 内置占名规则与补全共享，避免展示实际无法进入插件分发的用法。
+            None if args.len() == 1
+                && crate::commands::system::can_dispatch_plugin_command(&args[0]) =>
+            {
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        match crate::core::plugins::resolve_plugin_command(&cwd, &args[0]).await {
+                            Ok(Some(command)) => crate::core::i18n::t1("cmd.help.plugin_details")
+                                .replace("{name}", &command.name)
+                                .replace("{source}", &command.source)
+                                .replace("{description}", &command.description),
+                            Ok(None) => unknown_command(),
+                            Err(error) => crate::core::i18n::t1("cmd.help.plugin_error")
+                                .replace("{error}", &error),
+                        }
+                    }
+                    Err(error) => crate::core::i18n::t1("cmd.help.plugin_error")
+                        .replace("{error}", &error.to_string()),
+                }
+            }
+            None => unknown_command(),
         };
         ctx.state
             .chat_history
@@ -110,21 +142,289 @@ mod tests {
 
     #[tokio::test]
     async fn help_with_an_unknown_command_explains_the_mistake() {
-        let mut state = crate::ui::state::ChatState::new();
-        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let _fixture = PluginHelpFixture::new();
+        let reply = plugin_help_reply(&["definitely-not-a-command"]).await;
+        assert!(reply.contains("Unknown command"));
+        assert!(reply.contains("/help"));
+    }
+
+    struct PluginHelpFixture {
+        project: crate::ui::test_support::TestProject,
+        _global_config: tempfile::TempDir,
+        previous_config: Option<std::ffi::OsString>,
+    }
+
+    impl PluginHelpFixture {
+        fn new() -> Self {
+            let project = crate::ui::test_support::TestProject::new();
+            let global_config = tempfile::tempdir().expect("create isolated global plugin state");
+            let previous_config = std::env::var_os("STAR_CONFIG_DIR");
+            // 这些测试按项目约定串行运行，独立全局配置避免读取用户已安装插件。
+            std::env::set_var("STAR_CONFIG_DIR", global_config.path());
+            Self {
+                project,
+                _global_config: global_config,
+                previous_config,
+            }
+        }
+
+        fn assert_not_executed(&self, plugin: &str) {
+            let marker = "plugin-help-executed.marker";
+            assert!(!self.project.path().join(marker).exists());
+            assert!(!crate::core::plugins::plugins_dir(self.project.path())
+                .join(plugin)
+                .join(marker)
+                .exists());
+        }
+
+        async fn register(&self, plugin: &str, command: &str, enabled: bool) {
+            use crate::core::plugins::{self, PluginEntry};
+            let root = plugins::plugins_dir(self.project.path()).join(plugin);
+            std::fs::create_dir_all(root.join(".star-plugin")).expect("create plugin metadata");
+            std::fs::write(
+                root.join(".star-plugin/plugin.json"),
+                serde_json::to_string(&serde_json::json!({
+                    "name": plugin,
+                    "commands": [{
+                        "name": command,
+                        "description": "Inspect local fixture metadata",
+                        "command": "echo plugin-help-executed > plugin-help-executed.marker"
+                    }]
+                }))
+                .expect("serialize plugin metadata"),
+            )
+            .expect("write plugin metadata");
+            let mut manifest = plugins::load_manifest(self.project.path())
+                .await
+                .expect("load isolated plugin manifest");
+            manifest.plugins.push(PluginEntry {
+                name: plugin.to_string(),
+                source: "local-help-fixture".to_string(),
+                install_type: "local".to_string(),
+                installed_at: 0,
+                enabled,
+                scope: plugins::SCOPE_PROJECT.to_string(),
+            });
+            plugins::save_manifest(self.project.path(), &manifest)
+                .await
+                .expect("save isolated plugin manifest");
+        }
+    }
+
+    impl Drop for PluginHelpFixture {
+        fn drop(&mut self) {
+            match self.previous_config.take() {
+                Some(value) => std::env::set_var("STAR_CONFIG_DIR", value),
+                None => std::env::remove_var("STAR_CONFIG_DIR"),
+            }
+        }
+    }
+
+    async fn plugin_help_reply(args: &[&str]) -> String {
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
         help(
             CommandContext {
                 state: &mut state,
                 agent_tx: &agent_tx,
             },
-            vec!["definitely-not-a-command".to_string()],
+            args.iter().map(|arg| (*arg).to_string()).collect(),
         )
         .await
-        .unwrap();
+        .expect("help is a read-only command");
+        assert!(
+            agent_rx.try_recv().is_err(),
+            "help must not invoke the agent"
+        );
+        state
+            .chat_history
+            .last()
+            .expect("help reply")
+            .content
+            .clone()
+    }
 
-        let reply = &state.chat_history.last().expect("error message").content;
-        assert!(reply.contains("Unknown command"));
-        assert!(reply.contains("/help"));
+    #[tokio::test]
+    async fn help_for_plugin_command_shows_metadata_without_execution() {
+        let fixture = PluginHelpFixture::new();
+        fixture
+            .register("fixture-plugin", "fixture-check", true)
+            .await;
+        let reply = plugin_help_reply(&["fixture-check"]).await;
+        assert!(reply.contains("# /fixture-check"), "{reply}");
+        assert!(reply.contains("Inspect local fixture metadata"), "{reply}");
+        assert!(reply.contains("plugin:fixture-plugin"), "{reply}");
+        assert!(
+            !reply.contains("echo plugin-help-executed >"),
+            "must not expose the shell payload: {reply}"
+        );
+        let marker = "plugin-help-executed.marker";
+        assert!(
+            !fixture.project.path().join(marker).exists(),
+            "help must not execute the payload in the project directory"
+        );
+        assert!(
+            !crate::core::plugins::plugins_dir(fixture.project.path())
+                .join("fixture-plugin")
+                .join(marker)
+                .exists(),
+            "help must not execute the payload in the plugin directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_refreshes_after_disable_and_removal() {
+        use crate::core::plugins;
+        let fixture = PluginHelpFixture::new();
+        fixture
+            .register("fixture-plugin", "fixture-check", true)
+            .await;
+        assert!(plugin_help_reply(&["fixture-check"])
+            .await
+            .contains("# /fixture-check"));
+
+        let mut manifest = plugins::load_manifest(fixture.project.path())
+            .await
+            .unwrap();
+        manifest.plugins[0].enabled = false;
+        plugins::save_manifest(fixture.project.path(), &manifest)
+            .await
+            .unwrap();
+        assert!(plugin_help_reply(&["fixture-check"])
+            .await
+            .contains("Unknown command"));
+
+        manifest.plugins[0].enabled = true;
+        plugins::save_manifest(fixture.project.path(), &manifest)
+            .await
+            .unwrap();
+        assert!(plugin_help_reply(&["fixture-check"])
+            .await
+            .contains("# /fixture-check"));
+        manifest.plugins.clear();
+        plugins::save_manifest(fixture.project.path(), &manifest)
+            .await
+            .unwrap();
+        assert!(plugin_help_reply(&["fixture-check"])
+            .await
+            .contains("Unknown command"));
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_reports_ambiguous_sources() {
+        let fixture = PluginHelpFixture::new();
+        fixture
+            .register("fixture-first", "fixture-check", true)
+            .await;
+        fixture
+            .register("fixture-second", "fixture-check", true)
+            .await;
+        let reply = plugin_help_reply(&["fixture-check"]).await;
+        assert!(reply.contains("ambiguous"), "{reply}");
+        assert!(reply.contains("plugin:fixture-first"), "{reply}");
+        assert!(reply.contains("plugin:fixture-second"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_keeps_builtin_aliases_and_paths_authoritative() {
+        let fixture = PluginHelpFixture::new();
+        fixture.register("fixture-plugin", "compact", true).await;
+        let reply = plugin_help_reply(&["compact"]).await;
+        assert!(reply.contains("# /compress"), "{reply}");
+        assert!(!reply.contains("plugin:fixture-plugin"), "{reply}");
+
+        fixture
+            .register("fixture-other", "fixture-check", true)
+            .await;
+        let reply = plugin_help_reply(&["fixture-check", "unexpected"]).await;
+        assert!(reply.contains("Unknown command"), "{reply}");
+        assert!(!reply.contains("Inspect local fixture metadata"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_respects_builtin_prefix_reservations() {
+        let fixture = PluginHelpFixture::new();
+        fixture.register("fixture-prefix", "comp", true).await;
+        let parsed = crate::commands::system::parse_command("/comp").expect("唯一内置前缀");
+        assert_eq!(parsed.path, vec!["compress"]);
+        let reply = plugin_help_reply(&["comp"]).await;
+        assert!(reply.contains("# /compress"), "{reply}");
+        assert!(!reply.contains("plugin:fixture-prefix"), "{reply}");
+        fixture.assert_not_executed("fixture-prefix");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_excludes_legacy_dispatch_reservations() {
+        let fixture = PluginHelpFixture::new();
+        fixture.register("fixture-legacy", "git-status", true).await;
+        let reply = plugin_help_reply(&["git-status"]).await;
+        assert!(!reply.contains("plugin:fixture-legacy"), "{reply}");
+        assert!(!reply.contains("Inspect local fixture metadata"), "{reply}");
+        assert!(reply.contains("Unknown command"), "{reply}");
+        fixture.assert_not_executed("fixture-legacy");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_rejects_whitespace_inside_one_name() {
+        let _fixture = PluginHelpFixture::new();
+        for name in [
+            "comp extra",
+            "config set",
+            "comp\textra",
+            " comp",
+            "comp ",
+            "",
+        ] {
+            let reply = plugin_help_reply(&[name]).await;
+            assert!(reply.contains("Unknown command"), "{name:?}: {reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_allows_ambiguous_builtin_prefix() {
+        let fixture = PluginHelpFixture::new();
+        fixture.register("fixture-ambiguous", "re", true).await;
+        assert!(crate::commands::system::parse_command("/re").is_none());
+        let reply = plugin_help_reply(&["re"]).await;
+        assert!(reply.contains("# /re"), "{reply}");
+        assert!(reply.contains("plugin:fixture-ambiguous"), "{reply}");
+        fixture.assert_not_executed("fixture-ambiguous");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_excludes_disabled_runtime_commands() {
+        let fixture = PluginHelpFixture::new();
+        fixture
+            .register("fixture-plugin", "fixture-check", true)
+            .await;
+        let manifest = crate::core::plugins::plugins_dir(fixture.project.path())
+            .join("fixture-plugin/.star-plugin/plugin.json");
+        let mut content: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&manifest).expect("read plugin runtime manifest"),
+        )
+        .expect("parse plugin runtime manifest");
+        content["commands"][0]["enabled"] = serde_json::Value::Bool(false);
+        std::fs::write(&manifest, serde_json::to_string(&content).unwrap()).unwrap();
+        let reply = plugin_help_reply(&["fixture-check"]).await;
+        assert!(reply.contains("Unknown command"), "{reply}");
+        assert!(!reply.contains("Inspect local fixture metadata"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn help_for_plugin_command_reports_registry_errors_without_hiding_builtin_help() {
+        let fixture = PluginHelpFixture::new();
+        let path = crate::core::plugins::manifest_path(fixture.project.path());
+        std::fs::create_dir_all(path.parent().expect("manifest directory")).unwrap();
+        std::fs::write(path, "{broken").unwrap();
+        let builtin = plugin_help_reply(&["compact"]).await;
+        assert!(builtin.contains("# /compress"), "{builtin}");
+        let reply = plugin_help_reply(&["fixture-check"]).await;
+        assert!(
+            reply.contains("Unable to load plugin command help"),
+            "{reply}"
+        );
+        assert!(reply.contains("failed to parse"), "{reply}");
+        assert!(!reply.contains("Unknown command"), "{reply}");
     }
 
     #[tokio::test]

@@ -476,6 +476,27 @@ mod screenshot_regressions {
         assert!(!crate::commands::system::get_command_hints("/chat ").is_empty());
     }
     #[test]
+    fn dynamic_plugin_completion_uses_existing_overlay_layout() {
+        let mut state = ChatState::test_fixture();
+        state.plugin_commands.seed_for_tests(vec![
+            crate::commands::system::PluginCommandCandidate {
+                name: "fixture-check".into(),
+                description: "Inspect local fixture metadata".into(),
+            },
+        ]);
+        state.set_input_text("/fixture-");
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        crate::ui::test_support::assert_render!("dynamic_plugin_completion", 64, 5, |f| {
+            render_command_hints_overlay(
+                f,
+                &state,
+                Rect::new(0, 2, 64, 3),
+                state.theme_manager.current(),
+            );
+        });
+    }
+
+    #[test]
     fn command_completion_covers_full_input_width() {
         let mut state = ChatState::test_fixture();
         state.show_command_hints = true;

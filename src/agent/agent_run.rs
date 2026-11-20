@@ -191,6 +191,11 @@ impl Agent {
                 &user_input,
                 history_len,
             ).await;
+            // 分类已经结束，后续上下文加载不能继续沿用分析阶段。
+            yield AgentEvent::Trace {
+                event: "model_request_preparing".to_string(),
+                payload: serde_json::json!({"phase": "context_preparation"}),
+            };
             // Store complexity for dynamic thinking limits in call_llm
             self.task_complexity = request_complexity;
             let ctx = crate::core::routing::RoutingContext {
