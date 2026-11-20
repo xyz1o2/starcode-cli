@@ -58,6 +58,7 @@ pub struct ChatState {
     pub auto_continued_message_ids: HashSet<u64>,
     pub pending_user_messages: VecDeque<crate::types::UserInput>,
     pub input_intent: crate::types::InputIntent,
+    pub(crate) stashed_prompt: Option<StashedPrompt>,
     pub command_history_path: Option<std::path::PathBuf>,
     /// 已送入运行时的补充消息，以独立 message_id 区分，撤回以回执为准。
     pub steered_user_messages: Vec<(u64, crate::types::UserInput)>,
@@ -870,6 +871,7 @@ impl ChatState {
             auto_continued_message_ids: HashSet::new(),
             pending_user_messages: VecDeque::new(),
             input_intent: crate::types::InputIntent::CommandEligible,
+            stashed_prompt: None,
             command_history_path: crate::core::config::history_store::history_file(),
             steered_user_messages: Vec::new(),
             // ============ Command History ============

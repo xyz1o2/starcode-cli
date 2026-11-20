@@ -645,6 +645,48 @@ pub async fn dispatch_global_binding(
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match binding {
+        GlobalBinding::StashPrompt => {
+            let context = KeyContext::of(state);
+            let inline_completion = context == KeyContext::SuggestionOverlay
+                && !state.show_provider_menu
+                && !state.show_session_menu;
+            if !matches!(context, KeyContext::TextInput | KeyContext::Vim) && !inline_completion {
+                return Ok(true);
+            }
+            let has_input = state.textarea.lines().iter().any(|line| !line.is_empty())
+                || !state.paste_segments.is_empty();
+            if !has_input && state.stashed_prompt.is_none() {
+                return Ok(true);
+            }
+            let previous = state.stashed_prompt.take();
+            let had_stash = previous.is_some();
+            let current = has_input.then(|| crate::ui::state::StashedPrompt {
+                textarea: std::mem::take(&mut state.textarea),
+                paste_segments: std::mem::take(&mut state.paste_segments),
+                intent: state.input_intent,
+                folded: state.input_folded,
+            });
+            reset_main_textarea(state);
+            if let Some(previous) = previous {
+                state.textarea = previous.textarea;
+                state.paste_segments = previous.paste_segments;
+                state.input_intent = previous.intent;
+                state.input_folded = previous.folded;
+            }
+            sync_input_from_textarea(state);
+            state.stashed_prompt = current;
+            state.history_index = None;
+            state.history_input_snapshot = None;
+            crate::ui::services::suggestions::on_input_changed(state);
+            state.save_draft();
+            let message = match (has_input, had_stash) {
+                (true, false) => crate::core::i18n::t1("ui.stash.saved"),
+                (true, true) => crate::core::i18n::t1("ui.stash.swapped"),
+                _ => crate::core::i18n::t1("ui.stash.restored"),
+            };
+            state.push_toast(&message, crate::ui::state::ToastKind::Info);
+            Ok(true)
+        }
         GlobalBinding::WithdrawMessage => {
             if KeyContext::of(state).is_exclusive() {
                 return Ok(false);
@@ -1739,7 +1781,8 @@ pub async fn handle_key_event(
             // Ctrl+U: Delete from cursor to beginning of line (Unix readline)
             let (row, col) = state.textarea.cursor();
             if let Some(line) = state.textarea.lines().get(row) {
-                push_kill(state, line[..col.min(line.len())].to_string());
+                let killed = line.chars().take(col).collect::<String>();
+                push_kill(state, killed);
             }
             state.textarea.delete_line_by_head();
             sync_input_from_textarea(state);
@@ -1749,7 +1792,8 @@ pub async fn handle_key_event(
             // Ctrl+K: Delete from cursor to end of line (Unix readline)
             let (row, col) = state.textarea.cursor();
             if let Some(line) = state.textarea.lines().get(row) {
-                push_kill(state, line[col.min(line.len())..].to_string());
+                let killed = line.chars().skip(col).collect::<String>();
+                push_kill(state, killed);
             }
             state.textarea.delete_line_by_end();
             sync_input_from_textarea(state);
@@ -1760,52 +1804,37 @@ pub async fn handle_key_event(
             let (row, col) = state.textarea.cursor();
             let line_owned = state.textarea.lines().get(row).cloned();
             if let Some(line) = line_owned {
-                let line = line.as_str();
-                let before = &line[..col.min(line.len())];
-                let trimmed = before.trim_end();
-                let new_col = if trimmed.is_empty() {
+                let chars: Vec<char> = line.chars().collect();
+                let cursor = col.min(chars.len());
+                let before = &chars[..cursor];
+                let trimmed_len = before
+                    .iter()
+                    .rposition(|ch| !ch.is_whitespace())
+                    .map_or(0, |idx| idx + 1);
+                let new_col = if trimmed_len == 0 {
                     0
                 } else {
-                    // Find last word boundary: skip trailing spaces, then skip word chars
-                    let bytes = trimmed.as_bytes();
-                    let mut i = bytes.len() - 1;
-                    // Skip current char if it's a word boundary
-                    if !trimmed.is_char_boundary(i) {
-                        i -= 1;
-                    }
-                    let last_char = trimmed[i..].chars().next().unwrap_or(' ');
-                    if last_char.is_alphanumeric() || last_char == '_' {
-                        // Skip word chars backward
-                        while i > 0 && {
-                            let c = trimmed[..i].chars().last().unwrap_or(' ');
-                            c.is_alphanumeric() || c == '_'
-                        } {
-                            i -= 1;
+                    let last_is_word = before[trimmed_len - 1].is_alphanumeric()
+                        || before[trimmed_len - 1] == '_';
+                    let mut start = trimmed_len - 1;
+                    while start > 0 {
+                        let previous = before[start - 1];
+                        if (previous.is_alphanumeric() || previous == '_') != last_is_word {
+                            break;
                         }
-                    } else {
-                        // Skip non-word chars backward
-                        while i > 0 && {
-                            let c = trimmed[..i].chars().last().unwrap_or(' ');
-                            !c.is_alphanumeric() && c != '_'
-                        } {
-                            i -= 1;
-                        }
+                        start -= 1;
                     }
-                    i
+                    start
                 };
-                // Rebuild line: keep chars before new_col, skip chars from new_col to col
-                let killed = line[new_col..col.min(line.len())].to_string();
+                let killed: String = chars[new_col..cursor].iter().collect();
                 push_kill(state, killed);
-                let mut new_line = String::new();
-                new_line.push_str(&line[..new_col]);
-                if col < line.len() {
-                    new_line.push_str(&line[col..]);
-                }
-                // Delete the entire line and reinsert
+                let new_line: String = chars[..new_col]
+                    .iter()
+                    .chain(chars[cursor..].iter())
+                    .collect();
                 state.textarea.move_cursor(tui_textarea::CursorMove::Head);
                 state.textarea.delete_line_by_end();
                 state.textarea.insert_str(&new_line);
-                // Move cursor to new_col
                 state.textarea.move_cursor(tui_textarea::CursorMove::Head);
                 for _ in 0..new_col {
                     state
@@ -3981,6 +4010,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readline_kill_keys_use_character_columns_for_unicode_text() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("你abc好");
+        let (tx, _rx) = mpsc::channel(16);
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "abc好");
+
+        state.set_input_text("你abc好");
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "你");
+
+        state.set_input_text("甲 乙");
+        for _ in 0..4 {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "甲 ");
+    }
+
+    #[tokio::test]
     async fn recalling_queue_exits_history_without_losing_recalled_input() {
         let mut state = ChatState::test_fixture();
         state.set_input_text("original draft");
@@ -4027,6 +4137,156 @@ mod tests {
         assert!(state.history_index.is_none());
         assert!(state.history_input_snapshot.is_none());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_stashes_and_restores_the_prompt_without_submitting() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("first draft line\nsecond draft line");
+        state.textarea.move_cursor(tui_textarea::CursorMove::Back);
+        let cursor = state.textarea.cursor();
+        let (tx, mut rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, "", "Ctrl+S 应暂存而不是忽略当前草稿");
+        assert_eq!(state.textarea.lines().join("\n"), "");
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, "first draft line\nsecond draft line");
+        assert_eq!(state.textarea.cursor(), cursor);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_swaps_drafts_and_preserves_literal_image_input() {
+        let mut state = ChatState::test_fixture();
+        state.set_user_input(crate::types::UserInput {
+            text: "/literal [Image]".into(),
+            intent: crate::types::InputIntent::Literal,
+            images: vec![crate::types::ImageAttachment {
+                media_type: "image/png".into(),
+                data: "fixture-image-data".into(),
+                width: 1,
+                height: 1,
+            }],
+        });
+        let before = state.prepared_input().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.paste_segments.is_empty());
+        state.set_input_text("temporary question");
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        let restored = state.prepared_input().unwrap();
+        assert_eq!(restored.text, before.text);
+        assert_eq!(restored.intent, before.intent);
+        assert_eq!(restored.images[0].data, before.images[0].data);
+        assert_eq!(state.paste_segments.len(), 1);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, "temporary question");
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.prepared_input().unwrap().text, before.text);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_does_not_stash_through_modal_or_confirmation() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        for mode in 0..4 {
+            let mut state = ChatState::test_fixture();
+            state.set_input_text("private draft");
+            match mode {
+                0 => state.open_palette(PaletteMode::Main),
+                1 => {
+                    state.show_help = true;
+                }
+                2 => {
+                    state.is_awaiting_confirmation = true;
+                }
+                _ => {
+                    state.show_paste_confirmation = true;
+                }
+            }
+            handle_key_event(&mut state, key, &tx, None).await.unwrap();
+            assert_eq!(state.input, "private draft", "context {mode}");
+            assert!(state.stashed_prompt.is_none());
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_handles_empty_prompt_and_exits_history_on_stash() {
+        let mut state = ChatState::test_fixture();
+        let (tx, mut rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.stashed_prompt.is_none());
+        assert!(state.toast_queue.is_empty());
+        state.set_input_text("/resum");
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        assert!(state.show_command_hints);
+        state.history_index = Some(0);
+        state.history_input_snapshot = Some(crate::types::UserInput::from("old draft"));
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.input.is_empty());
+        assert!(!state.show_command_hints);
+        assert!(state.history_index.is_none());
+        assert!(state.history_input_snapshot.is_none());
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, "/resum");
+        assert!(state.show_command_hints);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_keeps_unreadable_image_reference_and_cancels_late_clipboard() {
+        let mut state = ChatState::test_fixture();
+        insert_image_paste_block(&mut state, "/missing/stashed-image.png".into(), 10, 10);
+        state.input_intent = crate::types::InputIntent::Literal;
+        sync_input_from_textarea(&mut state);
+        let before = state.input.clone();
+        let (sender, result) = tokio::sync::oneshot::channel();
+        state.pending_clipboard_read = Some(crate::ui::state::PendingClipboardRead {
+            target: crate::ui::state::ClipboardTarget::Prompt {
+                session_id: state.active_session_id.clone(),
+                session_started_at: state.session_started_at,
+                next_message_id: state.next_message_id,
+            },
+            result,
+        });
+        let (tx, mut rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.input.is_empty());
+        assert!(state.pending_clipboard_read.is_none());
+        assert!(sender
+            .send(Ok(crate::ui::state::ClipboardPayload::Text("late".into())))
+            .is_err());
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, before);
+        assert_eq!(state.paste_segments.len(), 1);
+        assert_eq!(state.input_intent, crate::types::InputIntent::Literal);
+        assert!(
+            state.prepared_input().is_err(),
+            "失效附件仍由发送校验，暂存不得删除引用"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_s_restores_editor_undo_history() {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("draft");
+        state.textarea.insert_str(" changed");
+        sync_input_from_textarea(&mut state);
+        let (tx, _rx) = mpsc::channel(16);
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert_eq!(state.input, "draft changed");
+        assert!(state.textarea.undo());
+        sync_input_from_textarea(&mut state);
+        assert_eq!(state.input, "draft");
     }
 
     /// 排队的输入按入队顺序拼回输入框，队列随之清空。

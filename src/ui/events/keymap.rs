@@ -40,6 +40,8 @@ pub enum GlobalBinding {
     QuickOpen,
     /// Ctrl+R — 历史搜索
     HistorySearch,
+    /// Ctrl+S — 暂存、恢复或交换输入草稿
+    StashPrompt,
     /// Ctrl+C — 复制选区 / 中断生成 / 连按两次退出
     CopyOrInterrupt,
     /// Ctrl+D — 退出
@@ -73,6 +75,7 @@ impl GlobalBinding {
             Self::SearchChat => "Ctrl+F",
             Self::QuickOpen => "Ctrl+Shift+P",
             Self::HistorySearch => "Ctrl+R",
+            Self::StashPrompt => "Ctrl+S",
             Self::CopyOrInterrupt => "Ctrl+C",
             Self::Exit => "Ctrl+D",
             Self::ClearScreen => "Ctrl+L",
@@ -125,6 +128,10 @@ pub const GLOBAL_BINDINGS: &[BindingDoc] = &[
     BindingDoc {
         binding: GlobalBinding::HistorySearch,
         key: "ui.help.key.history_search",
+    },
+    BindingDoc {
+        binding: GlobalBinding::StashPrompt,
+        key: "ui.help.key.stash_prompt",
     },
     BindingDoc {
         binding: GlobalBinding::CopyOrInterrupt,
@@ -193,6 +200,7 @@ pub fn binding_for(key: &KeyEvent) -> Option<GlobalBinding> {
             KeyCode::Char('f') => GlobalBinding::SearchChat,
             KeyCode::Char('p') if shift => GlobalBinding::QuickOpen,
             KeyCode::Char('r') => GlobalBinding::HistorySearch,
+            KeyCode::Char('s') if !shift => GlobalBinding::StashPrompt,
             KeyCode::Char('c') => GlobalBinding::CopyOrInterrupt,
             KeyCode::Char('d') => GlobalBinding::Exit,
             KeyCode::Char('l') => GlobalBinding::ClearScreen,
@@ -286,6 +294,24 @@ mod tests {
             binding_for(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
             None
         );
+    }
+
+    #[test]
+    fn ctrl_s_stash_does_not_claim_shift_or_alt_variants() {
+        assert_eq!(
+            binding_for(&key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(GlobalBinding::StashPrompt)
+        );
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::NONE,
+        ] {
+            assert_ne!(
+                binding_for(&key(KeyCode::Char('s'), modifiers)),
+                Some(GlobalBinding::StashPrompt)
+            );
+        }
     }
 
     #[test]
@@ -413,6 +439,7 @@ mod tests {
             GlobalBinding::SearchChat,
             GlobalBinding::QuickOpen,
             GlobalBinding::HistorySearch,
+            GlobalBinding::StashPrompt,
             GlobalBinding::CopyOrInterrupt,
             GlobalBinding::Exit,
             GlobalBinding::ClearScreen,

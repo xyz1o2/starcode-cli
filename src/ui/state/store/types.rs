@@ -109,6 +109,14 @@ pub struct PendingClipboardRead {
     pub result: tokio::sync::oneshot::Receiver<Result<ClipboardPayload, String>>,
 }
 
+/// 会话内暂存的完整编辑状态；不展开磁盘附件，恢复时仍由发送路径校验。
+pub(crate) struct StashedPrompt {
+    pub textarea: tui_textarea::TextArea<'static>,
+    pub paste_segments: Vec<PasteSegment>,
+    pub intent: crate::types::InputIntent,
+    pub folded: bool,
+}
+
 /// 粘贴块类型
 #[derive(Debug, Clone)]
 pub enum PasteKind {
