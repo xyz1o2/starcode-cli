@@ -272,6 +272,48 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_plugins_cannot_reactivate_literal_inline_completion() {
+        for use_tab in [false, true] {
+            let mut state = ChatState::test_fixture();
+            state.set_user_input("/fixture-".into());
+            state.show_command_hints = true;
+            state.command_hints = vec!["/fixture-old - Old candidate".into()];
+            apply_candidates(&mut state, vec![candidate("fixture-new")]);
+            assert!(!state.show_command_hints);
+            assert!(state.command_hints.is_empty());
+            let accepted = if use_tab {
+                crate::ui::services::suggestions::handle_tab(&mut state)
+            } else {
+                crate::ui::services::suggestions::handle_enter(&mut state)
+            };
+            assert!(
+                !accepted,
+                "background refresh must not consume literal input keys"
+            );
+            assert_eq!(state.input, "/fixture-");
+            assert_eq!(state.input_intent, crate::types::InputIntent::Literal);
+            assert!(!state.plugin_commands.inline_selection_lost);
+        }
+    }
+
+    #[test]
+    fn literal_prompt_does_not_disable_explicit_plugin_command_palette() {
+        let mut state = ChatState::test_fixture();
+        state.set_user_input("literal draft".into());
+        state.open_palette(PaletteMode::Command);
+        state.palette_filter = "fixture-".into();
+        apply_candidates(&mut state, vec![candidate("fixture-check")]);
+        let items = crate::ui::components::palette::palette_display_items(
+            &state.palette_mode,
+            &state,
+            &state.palette_filter,
+        );
+        assert!(items.iter().any(|item| item.label == "/fixture-check"));
+        assert_eq!(state.input, "literal draft");
+        assert_eq!(state.input_intent, crate::types::InputIntent::Literal);
+    }
+
+    #[test]
     fn catalog_clears_when_command_ui_closes() {
         let mut catalog = PluginCommandCatalog::default();
         catalog.root = Some(PathBuf::from("fixture-project"));

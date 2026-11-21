@@ -2119,6 +2119,58 @@ mod tests {
     use crate::ui::state::store::AgentTaskInfo;
 
     #[tokio::test]
+    async fn literal_command_prefix_enter_submits_once_without_accepting_stale_hints() {
+        let _project = crate::ui::test_support::TestProject::new();
+        for text in ["/resum", "/help", "!printf literal-only"] {
+            for stale_hints in [false, true] {
+                let mut state = ChatState::test_fixture();
+                // 即使正文资格保护回归，错误分流也只能拒绝，不能在测试中执行 shell。
+                state.approval_mode = crate::types::ApprovalMode::Plan;
+                state.chat_history.clear();
+                state.draft_path = None;
+                state.current_model = "test-model".into();
+                state.set_user_input(text.into());
+                crate::ui::services::suggestions::on_input_changed(&mut state);
+                if stale_hints {
+                    state.show_command_hints = true;
+                    state.command_hints = vec!["/resume - Resume a session".into()];
+                    state.plugin_commands.inline_selection_lost = true;
+                }
+                let (tx, mut rx) = mpsc::channel(8);
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .expect("submit literal prefix");
+                match rx
+                    .try_recv()
+                    .expect("first Enter must submit literal input")
+                {
+                    AgentRequest::SendMessage { message, .. } => assert_eq!(message, text),
+                    AgentRequest::SendUserInput { input, .. } => {
+                        assert_eq!(input.text, text);
+                        assert_eq!(input.intent, crate::types::InputIntent::Literal);
+                    }
+                    other => panic!("unexpected literal submission request: {other:?}"),
+                }
+                assert!(
+                    rx.try_recv().is_err(),
+                    "one Enter must send exactly one request"
+                );
+                assert!(state.input.is_empty());
+                assert!(state.pending_user_messages.is_empty());
+                assert!(!state.show_session_menu);
+                assert!(!state.is_palette_open());
+                assert!(!state.show_command_hints);
+                assert!(state.command_hints.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn pasted_markdown_hash_is_sent_in_full_instead_of_saved_as_memory() {
         let project = crate::ui::test_support::TestProject::new();
         let text = std::iter::once("# 粘贴的任务要求".to_string())

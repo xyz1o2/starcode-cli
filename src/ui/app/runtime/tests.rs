@@ -5,6 +5,75 @@ use super::*;
 use super::*;
 use crate::types::ChatEntry;
 
+#[test]
+fn startup_input_uses_final_capture_instead_of_stale_preview() {
+    for (preview, final_capture) in [
+        ("", "/resume"),
+        ("/res", "/resume"),
+        ("/resume", "/resume"),
+        ("stale text erased by backspace", ""),
+        ("检查", "检查启动输入 🦀\n第二行"),
+    ] {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text(preview);
+        restore_startup_input(
+            &mut state,
+            "",
+            &crate::types::UserInput::command_eligible(final_capture.into()),
+        );
+        assert_eq!(state.input, final_capture, "preview={preview:?}");
+        assert_eq!(state.textarea.lines().join("\n"), final_capture);
+        assert_eq!(state.input_line_count, final_capture.split('\n').count());
+    }
+}
+
+#[test]
+fn startup_input_pasted_prefixes_remain_literal_after_restore() {
+    for text in ["/help", "!printf should-not-run", "/help\n检查"] {
+        let mut state = ChatState::test_fixture();
+        restore_startup_input(&mut state, "", &text.into());
+        let prepared = state.prepared_input().expect("restored input");
+        assert_eq!(prepared.text, text);
+        assert_eq!(prepared.intent, crate::types::InputIntent::Literal);
+    }
+}
+
+#[test]
+fn startup_input_restores_draft_before_final_capture_without_duplication() {
+    let temp = tempfile::tempdir().expect("temporary draft directory");
+    let path = temp.path().join("draft.txt");
+    std::fs::write(&path, "saved draft").expect("write draft");
+    let mut state = ChatState::test_fixture();
+    state.draft_path = Some(path.clone());
+    state.set_input_text("/res");
+    restore_startup_input(
+        &mut state,
+        "",
+        &crate::types::UserInput::command_eligible("/resume\nnext line".into()),
+    );
+    assert_eq!(state.input, "saved draft\n/resume\nnext line");
+    assert_eq!(state.textarea.lines().join("\n"), state.input);
+    assert_eq!(state.input_line_count, 3);
+    assert!(!path.exists(), "restored draft must be consumed");
+}
+
+#[test]
+fn startup_input_explicit_message_overrides_capture_and_preserves_draft() {
+    let temp = tempfile::tempdir().expect("temporary draft directory");
+    let path = temp.path().join("draft.txt");
+    std::fs::write(&path, "saved draft").expect("write draft");
+    let mut state = ChatState::test_fixture();
+    state.draft_path = Some(path.clone());
+    state.set_input_text("/res");
+    restore_startup_input(&mut state, "explicit message", &"/resume".into());
+    assert_eq!(state.input, "explicit message");
+    assert_eq!(state.textarea.lines().join("\n"), "explicit message");
+    assert_eq!(
+        std::fs::read_to_string(path).expect("draft retained"),
+        "saved draft"
+    );
+}
+
 #[tokio::test]
 async fn exit_shutdown_without_acknowledgements_stops_waiting_at_budget() {
     let (tx, mut rx) = mpsc::channel(2);

@@ -970,6 +970,20 @@ fn sync_textarea(state: &mut ChatState, text: &str) {
     state.set_input_text(text);
 }
 
+/// 捕获线程停止后的最终快照才是完整输入，不能依赖上一次定时预览。
+fn restore_startup_input(
+    state: &mut ChatState,
+    initial_message: &str,
+    early_input: &crate::types::UserInput,
+) {
+    if !initial_message.is_empty() {
+        sync_textarea(state, initial_message);
+    } else {
+        state.set_user_input(early_input.clone());
+        state.restore_draft();
+    }
+}
+
 /// Robust terminal cleanup — safe to call multiple times.
 /// Handles partial initialization states (e.g. raw mode enabled but alt screen not entered).
 pub(crate) fn cleanup_terminal() {
@@ -1105,7 +1119,7 @@ pub async fn run_app(
 
     // ── 等待后台初始化完成（同时响应键盘输入和 Ctrl+C）──
     let mut init_rx = init_rx;
-    let mut last_preview = String::new();
+    let mut last_preview = crate::types::UserInput::command_eligible(String::new());
     let early_input_text;
     let (agent, config) = loop {
         tokio::select! {
@@ -1138,7 +1152,7 @@ pub async fn run_app(
                 let preview = super::early_input::peek_early_input();
                 if preview != last_preview {
                     // 把早期输入镜像进真正的输入框，用户看到的就是自己在主界面里打字
-                    sync_textarea(&mut state, &preview);
+                    state.set_user_input(preview.clone());
                     last_preview = preview;
                 }
                 terminal.draw(|f| super::draw_ui(f, &mut state))?;
@@ -1185,11 +1199,7 @@ pub async fn run_app(
     //
     // `--message` 指定的内容是用户显式给的，优先；没有它时恢复草稿，
     // 草稿在前、初始化期间敲的早期输入接在后面（见 `restore_draft`）。
-    if !initial_message.is_empty() {
-        sync_textarea(&mut state, &initial_message);
-    } else {
-        state.restore_draft();
-    }
+    restore_startup_input(&mut state, &initial_message, &early_input_text);
 
     // Worker owns the canonical protocol transcript. Retain both its lifecycle sender and
     // join handle so exit persistence and SessionEnd complete before restoring the terminal.

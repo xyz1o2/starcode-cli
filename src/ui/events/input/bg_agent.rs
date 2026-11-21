@@ -118,16 +118,20 @@ pub(crate) async fn handle_log_selector_key(
         KeyCode::Esc => {
             state.pop_modal();
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if !state.log_selector_state.is_loading {
                 state.log_selector_state.select_prev();
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if !state.log_selector_state.is_loading {
                 state.log_selector_state.select_next();
             }
         }
+        KeyCode::Char(_)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
         KeyCode::Char('/') => {
             if !state.log_selector_state.is_loading {
                 // Focus search
@@ -235,4 +239,180 @@ pub(crate) fn handle_theme_picker_key(state: &mut ChatState, key: KeyEvent) -> b
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::components::log_selector::LogSessionEntry;
+
+    fn browser_fixture() -> ChatState {
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("untouched draft");
+        state.open_log_selector();
+        state.log_selector_state.set_sessions(
+            [
+                ("other", "Other"),
+                ("first", "jk first"),
+                ("second", "jk second"),
+            ]
+            .into_iter()
+            .map(|(id, title)| LogSessionEntry {
+                id: id.to_string(),
+                title: title.to_string(),
+                created_at: String::new(),
+                message_count: 1,
+                preview: String::new(),
+            })
+            .collect(),
+        );
+        state
+    }
+
+    #[tokio::test]
+    async fn log_selector_types_jk_and_navigates_filtered_rows_with_arrows() {
+        let mut state = browser_fixture();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        for (character, query) in [('j', "j"), ('k', "jk")] {
+            super::super::handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("search character should be handled");
+            assert_eq!(state.log_selector_state.search_query, query);
+            assert_eq!(state.log_selector_state.selected_index, 0);
+            assert_eq!(
+                state
+                    .log_selector_state
+                    .get_selected_session()
+                    .map(|s| s.id.as_str()),
+                Some("first")
+            );
+        }
+
+        for (key, expected) in [
+            (KeyCode::Down, "second"),
+            (KeyCode::Down, "first"),
+            (KeyCode::Up, "second"),
+        ] {
+            super::super::handle_key_event(
+                &mut state,
+                KeyEvent::new(key, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("arrow should navigate filtered sessions");
+            assert_eq!(state.log_selector_state.search_query, "jk");
+            assert_eq!(
+                state
+                    .log_selector_state
+                    .get_selected_session()
+                    .map(|s| s.id.as_str()),
+                Some(expected)
+            );
+        }
+        assert_eq!(state.input, "untouched draft");
+        assert!(rx.try_recv().is_err());
+        assert!(state.pending_user_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_selector_ignores_unbound_shortcuts_without_changing_search() {
+        let mut state = browser_fixture();
+        state.log_selector_state.search_query = "jk".to_string();
+        state.log_selector_state.selected_index = 1;
+        let (tx, mut rx) = mpsc::channel(1);
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT),
+        ] {
+            assert!(crate::ui::events::keymap::binding_for(&key).is_none());
+            super::super::handle_key_event(&mut state, key, &tx, None)
+                .await
+                .expect("unbound shortcut should be consumed by the selector");
+            assert_eq!(state.log_selector_state.search_query, "jk", "{key:?}");
+            assert_eq!(state.log_selector_state.selected_index, 1, "{key:?}");
+            assert_eq!(state.input, "untouched draft");
+        }
+        assert!(rx.try_recv().is_err());
+        assert!(state.pending_user_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_selector_accepts_plain_shifted_and_unicode_search_text() {
+        let mut state = browser_fixture();
+        let (tx, mut rx) = mpsc::channel(1);
+        for (character, modifiers, expected) in [
+            ('j', KeyModifiers::NONE, "j"),
+            ('K', KeyModifiers::SHIFT, "jK"),
+            ('检', KeyModifiers::NONE, "jK检"),
+        ] {
+            super::super::handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(character), modifiers),
+                &tx,
+                None,
+            )
+            .await
+            .expect("printable text should reach the search query");
+            assert_eq!(state.log_selector_state.search_query, expected);
+            assert_eq!(state.log_selector_state.selected_index, 0);
+        }
+        assert_eq!(state.input, "untouched draft");
+        assert!(rx.try_recv().is_err());
+        assert!(state.pending_user_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_selector_loading_blocks_search_and_navigation_but_allows_escape() {
+        let mut state = browser_fixture();
+        state.log_selector_state.begin_loading();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Enter,
+        ] {
+            super::super::handle_key_event(
+                &mut state,
+                KeyEvent::new(code, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("loading selector should consume input");
+            assert!(state.log_selector_state.search_query.is_empty());
+            assert_eq!(state.log_selector_state.selected_index, 0);
+            assert_eq!(
+                state.top_modal(),
+                Some(&crate::ui::state::modal::Modal::LogSelector)
+            );
+        }
+
+        super::super::handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .expect("Escape should close the loading selector");
+        assert_ne!(
+            state.top_modal(),
+            Some(&crate::ui::state::modal::Modal::LogSelector)
+        );
+        assert_eq!(state.input, "untouched draft");
+        assert!(rx.try_recv().is_err());
+        assert!(state.pending_user_messages.is_empty());
+    }
 }

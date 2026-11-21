@@ -127,7 +127,11 @@ pub fn on_input_changed(state: &mut ChatState) {
 }
 
 pub(crate) fn refresh_command_hints(state: &mut ChatState) {
-    if state.input.starts_with('/') && !state.show_mention_hints && !should_suppress_hints(state) {
+    if state.input_intent == crate::types::InputIntent::CommandEligible
+        && state.input.starts_with('/')
+        && !state.show_mention_hints
+        && !should_suppress_hints(state)
+    {
         state.show_command_hints = true;
         state.command_hints = crate::commands::system::get_command_hints_with_plugins(
             &state.input,
@@ -256,8 +260,17 @@ fn update_textarea_from_input(state: &mut ChatState) {
     state.textarea = textarea;
 }
 
+fn discard_literal_command_hints(state: &mut ChatState) {
+    if state.input_intent == crate::types::InputIntent::Literal {
+        state.show_command_hints = false;
+        state.command_hints.clear();
+        state.plugin_commands.inline_selection_lost = false;
+    }
+}
+
 pub fn handle_enter(state: &mut ChatState) -> bool {
     crate::ui::services::plugin_commands::invalidate_changed_root(state);
+    discard_literal_command_hints(state);
     if state.show_session_menu {
         if crate::ui::services::session_list::invalidate_changed_directory(state) {
             return true;
@@ -319,6 +332,7 @@ pub fn handle_enter(state: &mut ChatState) -> bool {
 
 pub fn handle_tab(state: &mut ChatState) -> bool {
     crate::ui::services::plugin_commands::invalidate_changed_root(state);
+    discard_literal_command_hints(state);
     if state.show_mention_hints && !state.mention_hints.is_empty() {
         accept_mention_hint(state);
         return true;
@@ -511,6 +525,80 @@ mod tests {
         state.input = "读 @\"src".to_string();
         on_input_changed(&mut state);
         assert!(state.show_mention_hints, "未闭合的 @\" 仍应激活提示");
+    }
+
+    #[test]
+    fn literal_input_does_not_offer_or_accept_command_completions() {
+        for stale_hints in [false, true] {
+            for use_tab in [false, true] {
+                let mut state = ChatState::test_fixture();
+                state.set_user_input("/resum".into());
+                if stale_hints {
+                    state.show_command_hints = true;
+                    state.command_hints = vec!["/resume - Resume a session".into()];
+                } else {
+                    on_input_changed(&mut state);
+                    assert!(!state.show_command_hints);
+                    assert!(state.command_hints.is_empty());
+                }
+                let accepted = if use_tab {
+                    handle_tab(&mut state)
+                } else {
+                    handle_enter(&mut state)
+                };
+                assert!(
+                    !accepted,
+                    "literal input must not consume command completion"
+                );
+                assert_eq!(state.input, "/resum");
+                assert_eq!(state.textarea.lines().join("\n"), "/resum");
+                assert_eq!(state.input_intent, crate::types::InputIntent::Literal);
+                assert!(!state.show_command_hints);
+                assert!(state.command_hints.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_literal_prompt_restores_completion_only_after_full_clear() {
+        let mut state = ChatState::test_fixture();
+        state.set_user_input("/resumX".into());
+        state.textarea.delete_char();
+        crate::ui::events::clipboard_paste::sync_input_from_textarea(&mut state);
+        on_input_changed(&mut state);
+        assert_eq!(state.input, "/resum");
+        assert_eq!(state.input_intent, crate::types::InputIntent::Literal);
+        assert!(!state.show_command_hints);
+        assert!(state.command_hints.is_empty());
+        state.textarea.select_all();
+        state.textarea.cut();
+        crate::ui::events::clipboard_paste::sync_input_from_textarea(&mut state);
+        assert_eq!(
+            state.input_intent,
+            crate::types::InputIntent::CommandEligible
+        );
+        assert!(
+            !state.textarea.undo(),
+            "cleared literal text must not return as a command"
+        );
+        state.textarea.insert_str("/resum");
+        crate::ui::events::clipboard_paste::sync_input_from_textarea(&mut state);
+        on_input_changed(&mut state);
+        assert!(state.show_command_hints);
+        assert!(handle_tab(&mut state));
+        assert_eq!(state.input, "/resume");
+    }
+
+    #[test]
+    fn literal_input_still_offers_file_mentions() {
+        let mut state = ChatState::test_fixture();
+        state.set_user_input("See @Cargo".into());
+        on_input_changed(&mut state);
+        assert!(state.show_mention_hints);
+        assert!(state
+            .mention_hints
+            .iter()
+            .any(|hint| hint.contains("Cargo.toml")));
     }
 
     #[test]

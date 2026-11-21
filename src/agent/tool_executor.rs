@@ -1405,7 +1405,7 @@ impl ToolExecutor {
         //
         // 现在的语义：
         // - 空串/空白 → `{}`（无参工具的合法形态，各家 provider 都这么发）
-        // - `null` / 字面量 `"null"` → `{}`（LLM 偶发）
+        // - JSON `null` → `{}`；字符串 `"null"` 不属于对象，拒绝执行。
         // - 非空但解析失败 / 解出来不是对象 → 直接报错，指明"参数不完整且
         //   未执行"，这和流式执行器 `streaming_executor::is_call_complete`
         //   对残缺调用的判定（不进执行队列）是同一个闸门的两面。
@@ -4301,6 +4301,7 @@ mod tests {
         use crate::core::mcp::test_support::{McpFixture, ToolReply};
         use crate::core::mcp::MCPManager;
         use crate::core::state::GlobalState;
+        use crate::types::StarToolCallFunction;
 
         for is_error in [true, false] {
             let remote_result = if is_error {
@@ -4416,8 +4417,27 @@ mod tests {
             ToolExecutor::parse_tool_arguments(&encoded_object).unwrap(),
             json!({"libraryName": "react"})
         );
-        assert!(ToolExecutor::parse_tool_arguments(r#""[1,2]""#).is_err());
-        assert!(ToolExecutor::parse_tool_arguments(r#""123""#).is_err());
+        for raw in ["", "null", "{}"] {
+            assert_eq!(
+                ToolExecutor::parse_tool_arguments(raw),
+                Ok(json!({})),
+                "raw={raw:?}"
+            );
+        }
+        for raw in [
+            "[]",
+            "[1,2]",
+            "123",
+            "true",
+            r#""null""#,
+            r#""[1,2]""#,
+            r#""123""#,
+        ] {
+            assert!(
+                ToolExecutor::parse_tool_arguments(raw).is_err(),
+                "non-object arguments must not become an empty object: {raw:?}"
+            );
+        }
         let double_encoded = serde_json::to_string(&encoded_object).expect("encode twice");
         assert!(ToolExecutor::parse_tool_arguments(&double_encoded).is_err());
         assert!(ToolExecutor::parse_tool_arguments(r#"{"missing": "#).is_err());
