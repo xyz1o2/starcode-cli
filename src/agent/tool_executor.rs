@@ -4301,14 +4301,21 @@ mod tests {
         use crate::core::mcp::test_support::{McpFixture, ToolReply};
         use crate::core::mcp::MCPManager;
         use crate::core::state::GlobalState;
-        use crate::types::StarToolCallFunction;
 
         for is_error in [true, false] {
-            let remote_result = json!({
-                "isError": is_error,
-                "content": [{"type": "text", "text": "remote fixture diagnostic"}],
-                "_meta": {"requestTag": "keep-original"}
-            });
+            let remote_result = if is_error {
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "remote fixture diagnostic"}],
+                    "_meta": {"requestTag": "keep-original"}
+                })
+            } else {
+                json!({
+                    "isError": false,
+                    "content": [{"type": "text", "text": "remote fixture result"}],
+                    "_meta": {"requestTag": "keep-original"}
+                })
+            };
             let fixture = McpFixture::start(ToolReply::Result(remote_result.clone())).await;
             let manager = Arc::new(MCPManager::new());
             manager
@@ -4325,7 +4332,7 @@ mod tests {
                 crate::core::policy::PolicyEngine::new(Default::default()),
                 false,
             ));
-            bus.apply_turn_tool_policy(&["mcp__local-regression__inspect".into()], &[])
+            bus.set_approval_mode(crate::core::policy::types::ApprovalMode::BypassPermissions)
                 .await;
             config.install_runtime_services(RuntimeServices::new(
                 None,
@@ -4358,8 +4365,16 @@ mod tests {
             )
             .await
             .expect("MCP executor fixture timed out");
-            assert_eq!(result.success, !is_error, "{:?}", result.error);
-            assert_eq!(result.data.as_ref(), Some(&remote_result));
+            let diagnostics = fixture.diagnostics().await;
+            assert_eq!(
+                result.success, !is_error,
+                "result={result:?}; {diagnostics}"
+            );
+            assert_eq!(
+                result.data.as_ref(),
+                Some(&remote_result),
+                "result={result:?}; {diagnostics}"
+            );
             let rendered = if is_error {
                 assert!(result.output.is_none());
                 result.error.as_deref().expect("remote tool error retained")

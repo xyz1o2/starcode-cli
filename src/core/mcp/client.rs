@@ -293,6 +293,59 @@ mod tests {
         }
     }
 
+    struct FixedReplyTransport {
+        reply: Value,
+        sent: Arc<Mutex<Vec<Value>>>,
+        response: Arc<Mutex<Option<Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for FixedReplyTransport {
+        async fn start(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn send(&self, message: Value) -> Result<(), McpError> {
+            self.sent.lock().await.push(message.clone());
+            *self.response.lock().await = Some(serde_json::json!({
+                "jsonrpc": "2.0", "id": message["id"], "result": self.reply
+            }));
+            Ok(())
+        }
+
+        async fn receive(&self) -> Result<Option<Value>, McpError> {
+            Ok(self.response.lock().await.take())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_returns_remote_is_error_result_for_the_executor_to_classify() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let response = Arc::new(Mutex::new(None));
+        let remote_result = serde_json::json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "remote validation failure"}],
+            "_meta": {"requestTag": "mcp-error-preserved"}
+        });
+        let mut client = McpClient::new(Box::new(FixedReplyTransport {
+            reply: remote_result.clone(),
+            sent: sent.clone(),
+            response,
+        }));
+        client.initialized = true;
+
+        let result = client
+            .call_tool("inspect", serde_json::json!({"libraryName": "react"}))
+            .await
+            .expect("isError is a tool result, not a JSON-RPC failure");
+        assert_eq!(result, remote_result);
+        assert_eq!(sent.lock().await.len(), 1);
+    }
+
     #[tokio::test]
     async fn call_tool_preserves_remote_argument_names_and_values() {
         let sent = Arc::new(Mutex::new(Vec::new()));

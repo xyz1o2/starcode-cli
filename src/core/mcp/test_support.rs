@@ -17,33 +17,93 @@ pub(crate) enum ToolReply {
     ResponseLost,
 }
 
+#[derive(Default)]
+struct Observed {
+    requests: Mutex<Vec<Value>>,
+    side_effects: Mutex<Vec<Value>>,
+    connection_errors: Mutex<Vec<String>>,
+}
+
 pub(crate) struct McpFixture {
     pub(crate) config: MCPServerConfig,
-    requests: Arc<Mutex<Vec<Value>>>,
-    side_effects: Arc<Mutex<Vec<Value>>>,
+    observed: Arc<Observed>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
 
+fn json_response(value: Value) -> Response<Full<Bytes>> {
+    Response::builder()
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(value.to_string())))
+        .expect("fixture JSON response")
+}
+
+async fn respond(
+    request: Request<hyper::body::Incoming>,
+    observed: Arc<Observed>,
+    reply: ToolReply,
+) -> Result<Response<Full<Bytes>>, std::io::Error> {
+    let body = request
+        .into_body()
+        .collect()
+        .await
+        .map_err(std::io::Error::other)?
+        .to_bytes();
+    let message: Value = serde_json::from_slice(&body).expect("fixture request is JSON");
+    observed.requests.lock().await.push(message.clone());
+    let id = message.get("id").cloned();
+    let result = match message["method"].as_str() {
+        Some("initialize") => json!({
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "serverInfo": {"name": "fixture", "version": "1"}
+        }),
+        Some("tools/list") => json!({"tools": [{
+            "name": "inspect", "description": "Local regression fixture",
+            "inputSchema": {"type": "object"}
+        }]}),
+        Some("notifications/initialized") => {
+            return Ok(Response::builder()
+                .status(202)
+                .body(Full::new(Bytes::new()))
+                .expect("fixture notification response"));
+        }
+        Some("tools/call") => match reply {
+            ToolReply::Result(value) => value,
+            ToolReply::ProtocolError(error) => {
+                return Ok(json_response(
+                    json!({"jsonrpc": "2.0", "id": id, "error": error}),
+                ));
+            }
+            ToolReply::ResponseLost => {
+                // 先记下已执行的模拟副作用，再丢弃响应，不能靠重发恢复未知结果。
+                observed
+                    .side_effects
+                    .lock()
+                    .await
+                    .push(message["params"]["arguments"].clone());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "fixture dropped tool response",
+                ));
+            }
+        },
+        method => panic!("unexpected fixture method: {method:?}"),
+    };
+    Ok(json_response(
+        json!({"jsonrpc": "2.0", "id": id, "result": result}),
+    ))
+}
+
 impl McpFixture {
     pub(crate) async fn start(reply: ToolReply) -> Self {
-        Self::start_with_side_effects(reply, Arc::new(Mutex::new(Vec::new()))).await
-    }
-
-    pub(crate) async fn start_with_side_effects(
-        reply: ToolReply,
-        side_effects: Arc<Mutex<Vec<Value>>>,
-    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind MCP loopback fixture");
         let address = listener.local_addr().expect("fixture address");
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = requests.clone();
+        let observed = Arc::new(Observed::default());
+        let captured = observed.clone();
         let cancel = CancellationToken::new();
         let shutdown = cancel.clone();
-        let observed_side_effects = side_effects.clone();
-        let task_side_effects = observed_side_effects.clone();
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
@@ -51,78 +111,19 @@ impl McpFixture {
                     _ = shutdown.cancelled() => break,
                     connection = listener.accept() => {
                         let (socket, _) = connection.expect("accept MCP fixture connection");
-                        let requests = captured.clone();
-                        let side_effects = task_side_effects.clone();
+                        let observed = captured.clone();
                         let reply = reply.clone();
                         connections.spawn(async move {
-                            let service = hyper::service::service_fn(
-                                move |request: Request<hyper::body::Incoming>| {
-                                    let requests = requests.clone();
-                                    let side_effects = side_effects.clone();
-                                    let reply = reply.clone();
-                                    async move {
-                                        let body = request.into_body().collect().await
-                                            .map_err(std::io::Error::other)?.to_bytes();
-                                        let message: Value = serde_json::from_slice(&body)
-                                            .expect("fixture request is JSON");
-                                        requests.lock().await.push(message.clone());
-                                        let id = message.get("id").cloned();
-                                        let response = match message["method"].as_str() {
-                                            Some("initialize") => json!({
-                                                "protocolVersion": "2024-11-05",
-                                                "capabilities": {},
-                                                "serverInfo": {"name": "fixture", "version": "1"}
-                                            }),
-                                            Some("tools/list") => json!({"tools": [{
-                                                "name": "inspect",
-                                                "description": "Local regression fixture",
-                                                "inputSchema": {"type": "object"}
-                                            }]}),
-                                            Some("tools/call") => {
-                                                side_effects.lock().await.push(message["params"]["arguments"].clone());
-                                                match reply {
-                                                ToolReply::Result(value) => value,
-                                                ToolReply::ProtocolError(error) => {
-                                                    return Ok::<_, std::io::Error>(
-                                                        Response::builder()
-                                                            .header("Content-Type", "application/json")
-                                                            .body(Full::new(Bytes::from(json!({
-                                                                "jsonrpc": "2.0", "id": id,
-                                                                "error": error
-                                                            }).to_string())))
-                                                            .expect("fixture protocol response"),
-                                                    );
-                                                }
-                                                ToolReply::ResponseLost => {
-                                                    // 请求已经记录，随后断开响应，模拟副作用已完成的未知结果。
-                                                    return Err(std::io::Error::new(
-                                                        std::io::ErrorKind::ConnectionReset,
-                                                        "fixture dropped tool response",
-                                                    ));
-                                                }
-                                                }
-                                            },
-                                            Some("notifications/initialized") => {
-                                                return Ok(Response::builder()
-                                                    .status(202)
-                                                    .body(Full::new(Bytes::new()))
-                                                    .expect("fixture notification response"));
-                                            }
-                                            method => panic!("unexpected fixture method: {method:?}"),
-                                        };
-                                        Ok(Response::builder()
-                                            .header("Content-Type", "application/json")
-                                            .body(Full::new(Bytes::from(json!({
-                                                "jsonrpc": "2.0", "id": id, "result": response
-                                            }).to_string())))
-                                            .expect("fixture result response"))
-                                    }
-                                },
-                            );
-                            // ResponseLost 刻意关闭连接；客户端断开也不构成夹具失败。
-                            let _ = hyper::server::conn::http1::Builder::new()
+                            let requests = observed.clone();
+                            let service = hyper::service::service_fn(move |request| {
+                                respond(request, requests.clone(), reply.clone())
+                            });
+                            if let Err(error) = hyper::server::conn::http1::Builder::new()
                                 .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
-                                .await;
+                                .await
+                            {
+                                observed.connection_errors.lock().await.push(error.to_string());
+                            }
                         });
                     }
                     Some(result) = connections.join_next(), if !connections.is_empty() => {
@@ -131,7 +132,14 @@ impl McpFixture {
                 }
             }
             connections.abort_all();
-            while connections.join_next().await.is_some() {}
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result {
+                    assert!(
+                        error.is_cancelled(),
+                        "MCP fixture connection task panicked: {error}"
+                    );
+                }
+            }
         });
         let config = MCPServerConfig {
             name: "local-regression".to_string(),
@@ -150,19 +158,26 @@ impl McpFixture {
         };
         Self {
             config,
-            requests,
-            side_effects: observed_side_effects,
+            observed,
             cancel,
             task,
         }
     }
 
     pub(crate) async fn requests(&self) -> Vec<Value> {
-        self.requests.lock().await.clone()
+        self.observed.requests.lock().await.clone()
     }
 
     pub(crate) async fn side_effects(&self) -> Vec<Value> {
-        self.side_effects.lock().await.clone()
+        self.observed.side_effects.lock().await.clone()
+    }
+
+    pub(crate) async fn diagnostics(&self) -> String {
+        format!(
+            "requests={:?}; connection_errors={:?}",
+            self.requests().await,
+            self.observed.connection_errors.lock().await
+        )
     }
 
     pub(crate) async fn shutdown(self) {

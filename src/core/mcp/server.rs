@@ -611,9 +611,10 @@ mod tests {
         .await
         .expect("protocol fixture timed out")
         .expect_err("protocol error must fail");
+        let diagnostics = fixture.diagnostics().await;
         let error = error
             .downcast_ref::<McpJsonRpcError>()
-            .expect("typed JSON-RPC error");
+            .unwrap_or_else(|| panic!("expected typed JSON-RPC error, got {error}; {diagnostics}"));
         assert_eq!(error.code, Some(-32602));
         assert_eq!(error.message, "invalid remote arguments");
         assert_eq!(error.data.as_ref(), Some(&details));
@@ -634,6 +635,7 @@ mod tests {
                 .count(),
             1
         );
+        assert!(fixture.side_effects().await.is_empty());
         server.disconnect().await;
         fixture.shutdown().await;
     }
