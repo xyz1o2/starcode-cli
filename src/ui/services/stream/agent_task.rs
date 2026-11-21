@@ -35,7 +35,7 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
         .and_then(|i| i.finished_at)
         .or_else(|| incoming_terminal.then(std::time::Instant::now));
     let mut sub_entries = prior.map(|i| i.sub_entries.clone()).unwrap_or_default();
-    sub_entries.extend(args.new_sub_entries.iter().cloned());
+    merge_sub_entries(&mut sub_entries, &args.new_sub_entries);
     // 进度 chunk 未携带这些字段时沿用旧值，避免状态行闪回 "Initializing…"
     // 失败终态缺正文时只保留之前的失败原因，不能把成功的工具活动当作错误。
     let last_tool_info = args.last_tool_info.clone().or_else(|| {
@@ -156,6 +156,106 @@ pub(super) fn handle_agent_task_update(state: &mut ChatState, args: AgentTaskUpd
             .virtual_list
             .total_lines()
             .saturating_sub(state.last_chat_height as usize);
+    }
+}
+
+/// 合并 teammate transcript 的增量，并按 tool_call.id 把结果贴回调用。
+///
+/// 工具事件按完成顺序到达，而调用按开始顺序记录；直接 append 会让并发结果
+/// 堆在 transcript 尾部。这里只关联带非空 ID 的工具条目，不凭工具名或文本去重。
+fn merge_sub_entries(
+    existing: &mut Vec<crate::types::ChatEntry>,
+    incoming: &[crate::types::ChatEntry],
+) {
+    use crate::types::{ChatEntryType, EntryStatus};
+
+    for entry in incoming {
+        let call_id = entry
+            .tool_call
+            .as_ref()
+            .map(|call| call.id.as_str())
+            .filter(|id| !id.is_empty());
+        let Some(call_id) = call_id else {
+            existing.push(entry.clone());
+            continue;
+        };
+
+        match entry.entry_type {
+            ChatEntryType::ToolCall => {
+                if existing.iter().any(|prior| {
+                    prior.entry_type == ChatEntryType::ToolCall
+                        && prior
+                            .tool_call
+                            .as_ref()
+                            .is_some_and(|call| call.id == call_id)
+                }) {
+                    continue;
+                }
+
+                // 结果可能因两个异步传输通道先于调用条目抵达；到达调用时，
+                // 将它放到孤立结果之前，恢复一个可理解的调用组。
+                let insert_pos = existing.iter().position(|prior| {
+                    prior.entry_type == ChatEntryType::ToolResult
+                        && prior
+                            .tool_call
+                            .as_ref()
+                            .is_some_and(|call| call.id == call_id)
+                });
+                if let Some(insert_pos) = insert_pos {
+                    let result_success = existing[insert_pos]
+                        .tool_result
+                        .as_ref()
+                        .is_some_and(|result| result.success);
+                    let mut call_entry = entry.clone();
+                    call_entry.is_streaming = Some(false);
+                    call_entry.status = Some(if result_success {
+                        EntryStatus::Success
+                    } else {
+                        EntryStatus::SoftError
+                    });
+                    existing.insert(insert_pos, call_entry);
+                } else {
+                    existing.push(entry.clone());
+                }
+            }
+            ChatEntryType::ToolResult => {
+                if existing.iter().any(|prior| {
+                    prior.entry_type == ChatEntryType::ToolResult
+                        && prior
+                            .tool_call
+                            .as_ref()
+                            .is_some_and(|call| call.id == call_id)
+                }) {
+                    continue;
+                }
+
+                let call_pos = existing.iter().position(|prior| {
+                    prior.entry_type == ChatEntryType::ToolCall
+                        && prior
+                            .tool_call
+                            .as_ref()
+                            .is_some_and(|call| call.id == call_id)
+                });
+                if let Some(call_pos) = call_pos {
+                    let success = entry
+                        .tool_result
+                        .as_ref()
+                        .is_some_and(|result| result.success);
+                    let tool_call = &mut existing[call_pos];
+                    tool_call.is_streaming = Some(false);
+                    tool_call.status = Some(if success {
+                        EntryStatus::Success
+                    } else {
+                        EntryStatus::SoftError
+                    });
+                    existing.insert(call_pos + 1, entry.clone());
+                } else {
+                    // 保留尚未匹配的结果；调用晚到时由 ToolCall 分支插回结果之前。
+                    existing.push(entry.clone());
+                }
+            }
+            _ => existing.push(entry.clone()),
+        }
     }
 }
 

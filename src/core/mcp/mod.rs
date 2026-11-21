@@ -8,6 +8,9 @@ pub mod server;
 pub mod transport;
 pub mod types;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use config::{
     load_effective_mcp_config, load_effective_mcp_servers, load_project_mcp_config,
     project_star_mcp_path, save_project_mcp_config, McpConfigScope, McpServerEntry,

@@ -77,6 +77,8 @@ pub async fn run_streaming_session(
     // `StreamRetryPolicy`（参数、退避、文案全部来自 `llm::retry` 内核）。
     let mut retry_policy = crate::runtime::stream_retry::StreamRetryPolicy::default();
     'attempt: loop {
+        // 先取得共享任务注册表，避免与流 future 对 agent 的可变借用重叠。
+        let subagent_tasks = agent.runtime_subagent_tasks();
         match agent
             .process_user_input_stream(crate::types::UserInput {
                 text: context.user_message.to_string(),
@@ -119,6 +121,7 @@ pub async fn run_streaming_session(
                                     steering_queue: context.steering_queue,
                                     steering_signal: context.steering_signal,
                                     message_bus: context.message_bus,
+                                    subagent_tasks: subagent_tasks.clone(),
                                     model_switch_cell: context.model_switch_cell,
                                 },
                             ).await {

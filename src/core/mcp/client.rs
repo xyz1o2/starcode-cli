@@ -1,5 +1,5 @@
 use crate::core::mcp::transport::Transport;
-use crate::core::mcp::types::{MCPResourceContent, McpError};
+use crate::core::mcp::types::{MCPResourceContent, McpError, McpJsonRpcError};
 use serde_json::Value;
 use tokio::time::Duration;
 
@@ -129,7 +129,16 @@ impl McpClient {
                 }
 
                 if let Some(err) = v.get("error") {
-                    return Err(format!("mcp jsonrpc error: {}", err).into());
+                    let error: McpError = Box::new(McpJsonRpcError {
+                        code: err.get("code").and_then(Value::as_i64),
+                        message: err
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unspecified JSON-RPC error")
+                            .to_string(),
+                        data: err.get("data").cloned(),
+                    });
+                    return Err(error);
                 }
 
                 return Ok(v
@@ -244,5 +253,70 @@ impl McpClient {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::mcp::transport::Transport;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    struct CapturingTransport {
+        sent: Arc<Mutex<Vec<Value>>>,
+        response: Arc<Mutex<Option<Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for CapturingTransport {
+        async fn start(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn send(&self, message: Value) -> Result<(), McpError> {
+            *self.response.lock().await = Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {"content": []}
+            }));
+            self.sent.lock().await.push(message);
+            Ok(())
+        }
+
+        async fn receive(&self) -> Result<Option<Value>, McpError> {
+            Ok(self.response.lock().await.take())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn call_tool_preserves_remote_argument_names_and_values() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let response = Arc::new(Mutex::new(None));
+        let transport = CapturingTransport {
+            sent: sent.clone(),
+            response,
+        };
+        let mut client = McpClient::new(Box::new(transport));
+        client.initialized = true;
+
+        let arguments = serde_json::json!({
+            "libraryName": "react",
+            "nestedOptions": {"includeBeta": true},
+            "version": "18"
+        });
+        client
+            .call_tool("resolve-library-id", arguments.clone())
+            .await
+            .expect("fixture call succeeds");
+
+        let messages = sent.lock().await;
+        assert_eq!(messages.len(), 1, "one tools/call RPC should be sent");
+        assert_eq!(messages[0]["method"], "tools/call");
+        assert_eq!(messages[0]["params"]["arguments"], arguments);
     }
 }

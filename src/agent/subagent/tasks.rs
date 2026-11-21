@@ -167,3 +167,27 @@ impl SubagentTasks {
         self.entries.get(task_id).cloned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn request_stop_distinguishes_missing_uncontrollable_active_and_finished_tasks() {
+        let mut tasks = SubagentTasks::default();
+        assert!(tasks.request_stop("missing").is_err());
+
+        tasks.register("unattached", "work".into(), PathBuf::from("output.txt"));
+        assert!(!tasks.request_stop("unattached").unwrap());
+
+        tasks.register("active", "work".into(), PathBuf::from("output.txt"));
+        let cancel = Arc::new(AtomicBool::new(false));
+        tasks.attach_cancel("active", cancel.clone());
+        assert!(tasks.request_stop("active").unwrap());
+        assert!(cancel.load(Ordering::SeqCst));
+
+        tasks.finish("active", NotificationStatus::Completed, None);
+        assert!(!tasks.request_stop("active").unwrap());
+    }
+}

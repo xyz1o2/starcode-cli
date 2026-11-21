@@ -9,8 +9,6 @@ use tokio::sync::RwLock;
 
 const PLUGIN_MCP_SERVER_PREFIX: &str = "plugin:";
 
-use crate::core::mcp::types::join_call_and_reconnect_errors;
-
 /// 「刷新结果 + 工具缓存」→ 这次调用能不能继续。
 ///
 /// 纯函数，好让"刷新失败不许变成 Tool not found"这条规则能直接被测，
@@ -137,16 +135,9 @@ impl MCPManager {
         let refresh = server.refresh_tools().await;
         resolve_tool_call(server_name, tool_name, refresh, server.get_tools())?;
 
-        match server.call_tool(tool_name, arguments.clone()).await {
-            Ok(result) => Ok(result),
-            Err(e) => match server.try_reconnect().await {
-                Ok(()) => server.call_tool(tool_name, arguments).await,
-                // 重连也失败时，**两段原因都要留着**：最初那次调用为什么失败，
-                // 以及重连为什么失败。以前只报第一段，"重连失败"这个真正的
-                // 现场信息被吞掉，排查时只能看到一个已经过时的错误。
-                Err(reconnect_err) => Err(join_call_and_reconnect_errors(&e, &reconnect_err)),
-            },
-        }
+        // `MCPServer::call_tool` 是唯一的传输重连边界。这里不能再包一层
+        // retry：业务错误已由它区分，且调用结果不确定时重发可能重复副作用。
+        server.call_tool(tool_name, arguments).await
     }
 
     pub async fn get_prompt(
@@ -465,6 +456,7 @@ mod split_disambiguation_tests {
 #[cfg(test)]
 mod call_tool_error_tests {
     use super::*;
+    use crate::core::mcp::types::join_call_and_reconnect_errors;
 
     fn tool(name: &str) -> MCPTool {
         MCPTool {

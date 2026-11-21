@@ -69,6 +69,33 @@ fn historical_compaction_does_not_change_the_footer() {
     }
 }
 
+#[test]
+fn ctrl_c_exit_hint_is_visible_while_idle_and_during_cancel_grace() {
+    let mut state = crate::ui::state::ChatState::test_fixture();
+    state.is_processing = false;
+    state.last_ctrl_c = Some(std::time::Instant::now());
+
+    let text: String = build_status_lines(&state, 100)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains(&crate::core::i18n::t1("ui.status.ctrl_c_exit")));
+
+    state.is_streaming = true;
+    state.cancelling_since = Some(std::time::Instant::now());
+    let cancelling: String = build_status_lines(&state, 100)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(cancelling.contains(&crate::core::i18n::t1("ui.status.ctrl_c_exit")));
+    state.is_streaming = false;
+    state.cancelling_since = None;
+    state.last_ctrl_c = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    assert_eq!(build_status_lines(&state, 100).len(), 1);
+}
+
 /// 没有待确认的切换时，状态栏就是原来那一行。
 #[test]
 fn no_confirmation_adds_no_extra_line() {

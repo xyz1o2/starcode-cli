@@ -463,16 +463,15 @@ impl MCPServer {
             }
             Err(e) => {
                 drop(cli);
+                // 重连只恢复后续请求，绝不重发当前调用：传输错误也可能发生在
+                // 服务端完成副作用后、响应送达前，结果不确定时重复执行并不安全。
+                if e.downcast_ref::<crate::core::mcp::types::McpJsonRpcError>()
+                    .is_some()
+                {
+                    return Err(e);
+                }
                 match self.try_reconnect().await {
-                    Ok(()) => {
-                        let cli_arc2 = self
-                            .client
-                            .as_ref()
-                            .ok_or("MCP client not connected after reconnect")?
-                            .clone();
-                        let mut cli2 = cli_arc2.lock().await;
-                        cli2.call_tool(tool_name, arguments).await
-                    }
+                    Ok(()) => Err(e),
                     Err(reconnect_error) => {
                         Err(crate::core::mcp::types::join_call_and_reconnect_errors(
                             &e,
@@ -592,6 +591,99 @@ mod tests {
     use super::*;
     use crate::core::mcp::transport::Transport;
     use crate::core::mcp::types::TransportConfig;
+
+    #[tokio::test]
+    async fn protocol_error_preserves_details_without_reconnecting_or_replaying() {
+        use crate::core::mcp::test_support::{McpFixture, ToolReply};
+        use crate::core::mcp::types::McpJsonRpcError;
+        use serde_json::json;
+
+        let details = json!({"field": "libraryName", "received": "18"});
+        let fixture = McpFixture::start(ToolReply::ProtocolError(json!({
+            "code": -32602, "message": "invalid remote arguments", "data": details
+        })))
+        .await;
+        let mut server = MCPServer::new(fixture.config.clone());
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.call_tool("inspect", json!({"libraryName": "react"})),
+        )
+        .await
+        .expect("protocol fixture timed out")
+        .expect_err("protocol error must fail");
+        let error = error
+            .downcast_ref::<McpJsonRpcError>()
+            .expect("typed JSON-RPC error");
+        assert_eq!(error.code, Some(-32602));
+        assert_eq!(error.message, "invalid remote arguments");
+        assert_eq!(error.data.as_ref(), Some(&details));
+        assert_eq!(server.status, MCPServerStatus::Connected);
+        assert_eq!(server.retry_count, 0);
+        let requests = fixture.requests().await;
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|v| v["method"] == "initialize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|v| v["method"] == "tools/call")
+                .count(),
+            1
+        );
+        server.disconnect().await;
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lost_tool_response_reconnects_without_replaying_the_call() {
+        use crate::core::mcp::test_support::{McpFixture, ToolReply};
+        use serde_json::json;
+
+        let fixture = McpFixture::start(ToolReply::ResponseLost).await;
+        let mut server = MCPServer::new(fixture.config.clone());
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.call_tool("inspect", json!({"libraryName": "react"})),
+        )
+        .await
+        .expect("response loss fixture timed out")
+        .expect_err("unknown result must fail");
+        assert!(error.to_string().contains("HTTP POST failed"), "{error}");
+        assert_eq!(
+            server.status,
+            MCPServerStatus::Connected,
+            "reconnect must succeed"
+        );
+        assert_eq!(server.retry_count, 0);
+        let requests = fixture.requests().await;
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|v| v["method"] == "initialize")
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|v| v["method"] == "tools/call")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fixture.side_effects().await,
+            vec![json!({"libraryName": "react"})]
+        );
+        assert!(requests
+            .last()
+            .is_some_and(|v| v["method"] == "notifications/initialized"));
+        server.disconnect().await;
+        fixture.shutdown().await;
+    }
 
     struct FailedCallTransport;
 

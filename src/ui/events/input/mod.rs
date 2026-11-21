@@ -905,6 +905,7 @@ async fn cycle_thinking_effort(
 /// 返回 None 时会静默继续往下走，用户想复制结果把正在输出的内容 Abort 掉了。
 async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sender<AgentRequest>) {
     if state.text_selection.has_selection() {
+        state.last_ctrl_c = None;
         // 复制走 `ui::selection::copy_selection` —— 和鼠标松开同一个入口，
         // 系统剪贴板优先、失败自动退回 OSC 52（SSH/WSL 下 arboard 写的是远端
         // 剪贴板，那条环境里能用的正是 OSC 52）。
@@ -925,11 +926,61 @@ async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sen
         return;
     }
 
+    let now = Instant::now();
+    let within_double_press = state
+        .last_ctrl_c
+        .is_some_and(|previous| now.duration_since(previous) <= Duration::from_millis(1500));
+    if within_double_press {
+        state.last_ctrl_c = None;
+        state.should_exit = true;
+        return;
+    }
+    state.last_ctrl_c = Some(now);
+
+    // 查看子代理时，Ctrl+C 先向当前代理发送定向停止请求并回到主会话；它不应
+    // 错误地取消 lead turn。下一次 Ctrl+C 仍可按双击语义退出整个 TUI。
+    if let Some(task_id) = state.viewing_agent_task_id.clone() {
+        let stop_task = state.active_agent_tasks.get(&task_id).is_some_and(|info| {
+            info.is_async
+                && matches!(
+                    info.status,
+                    crate::types::AgentTaskStatus::Running
+                        | crate::types::AgentTaskStatus::Background
+                )
+        });
+        if stop_task {
+            match agent_tx.try_send(AgentRequest::StopBackgroundAgent {
+                task_id: task_id.clone(),
+            }) {
+                Ok(()) => {
+                    // 不阻塞键盘事件等待 worker；实际取消结果由后续流消息反馈。
+                    let message =
+                        crate::core::i18n::t1("agent.stop.queued").replace("{task}", &task_id);
+                    state.push_toast(&message, crate::ui::state::store::ToastKind::Info);
+                }
+                Err(error) => {
+                    let message = crate::core::i18n::t1("agent.stop.queue_failed")
+                        .replace("{task}", &task_id)
+                        .replace("{error}", &error.to_string());
+                    state.push_toast(&message, crate::ui::state::store::ToastKind::Error);
+                }
+            }
+        } else {
+            state.push_toast(
+                &crate::core::i18n::t1("agent.returned_main"),
+                crate::ui::state::store::ToastKind::Info,
+            );
+        }
+        state.exit_teammate_view();
+        state.auto_follow = true;
+        return;
+    }
+
     // 流输出"僵住"：取消宽限期已过但 is_streaming 没复位（例如 Done 落在宽限窗口里）。
     let cancelling_stale = state.is_streaming
         && state
             .cancelling_since
-            .map(|t| t.elapsed() > Duration::from_millis(1500))
+            .map(|started| started.elapsed() > Duration::from_millis(1500))
             .unwrap_or(false);
     if cancelling_stale {
         state.is_streaming = false;
@@ -938,31 +989,30 @@ async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sen
     }
 
     if state.is_streaming || state.is_processing {
-        // Cancel streaming; first Ctrl+C resets the double-press timer
-        let _ = agent_tx.send(AgentRequest::Abort).await;
-        state.current_status_line = Some("Cancelling...".to_string());
-        state.is_processing = false;
-        state.last_ctrl_c = None;
-        state.cancelling_since = Some(Instant::now());
+        // try_send 避免满队列把键盘事件循环卡死。失败时保留真实运行状态，
+        // 用户仍可再按 Ctrl+C 退出，而不能伪报“已取消”。
+        match agent_tx.try_send(AgentRequest::Abort) {
+            Ok(()) => {
+                state.current_status_line = Some(crate::core::i18n::t1("ui.thinking.cancelling"));
+                state.is_processing = false;
+                state.cancelling_since = Some(now);
+            }
+            Err(error) => {
+                state.current_status_line = Some(
+                    crate::core::i18n::t1("ui.status.interrupt_failed")
+                        .replace("{error}", &error.to_string()),
+                );
+            }
+        }
         return;
     }
-
-    // Double-press detection: two Ctrl+C within 1.5 s exits
-    let now = Instant::now();
-    if let Some(prev) = state.last_ctrl_c {
-        if now.duration_since(prev) <= Duration::from_millis(1500) {
-            state.should_exit = true;
-            return;
-        }
-    }
-    state.last_ctrl_c = Some(now);
 
     if !state.input.is_empty() {
         // First press: clear input
         reset_main_textarea(state);
         crate::ui::services::suggestions::on_input_changed(state);
     }
-    state.current_status_line = Some("Press Ctrl+C again to exit".to_string());
+    state.current_status_line = Some(crate::core::i18n::t1("ui.status.ctrl_c_exit"));
 }
 
 pub async fn handle_key_event(
@@ -971,6 +1021,21 @@ pub async fn handle_key_event(
     agent_tx: &mpsc::Sender<AgentRequest>,
     last_key_time: Option<Instant>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Ctrl+C 是跨面板的复制/中断/退出键，必须在搜索、行内确认和 modal 处理前
+    // 分发；其他全局键仍保留原优先级，避免改写各自的面板语义。
+    if crate::ui::events::keymap::binding_for(&key) == Some(GlobalBinding::CopyOrInterrupt) {
+        // 长按产生的 Repeat 不是第二次主动按下，不能触发退出。
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return Ok(());
+        }
+        dispatch_global_binding(state, GlobalBinding::CopyOrInterrupt, key, agent_tx).await?;
+        return Ok(());
+    }
+    if key.kind == crossterm::event::KeyEventKind::Press {
+        // 提示要求连续两次 Ctrl+C；中间发生其他按键时重新开始计次。
+        state.last_ctrl_c = None;
+    }
+
     // 确认卡的粘贴先于旧模态处理，避免隐藏的输入模态截走图片。
     if KeyContext::of(state) == KeyContext::ToolConfirmation && handle_paste(state, key).await? {
         return Ok(());
@@ -2683,6 +2748,264 @@ mod tests {
         .unwrap();
 
         assert!(!state.show_help, "F1 必须关掉帮助浮层");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_repeat_does_not_count_as_second_press() {
+        let mut state = ChatState::test_fixture();
+        let (tx, _rx) = mpsc::channel(4);
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        let mut repeat = key;
+        repeat.kind = crossterm::event::KeyEventKind::Repeat;
+        handle_key_event(&mut state, repeat, &tx, None)
+            .await
+            .unwrap();
+        assert!(!state.should_exit);
+    }
+
+    #[tokio::test]
+    async fn another_key_breaks_the_double_ctrl_c_sequence() {
+        let mut state = ChatState::test_fixture();
+        let (tx, _rx) = mpsc::channel(4);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, ctrl_c, &tx, None)
+            .await
+            .unwrap();
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        handle_key_event(&mut state, ctrl_c, &tx, None)
+            .await
+            .unwrap();
+        assert!(!state.should_exit);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_expired_window_and_closed_worker_do_not_fake_cancellation() {
+        let mut state = ChatState::test_fixture();
+        state.last_ctrl_c = Some(Instant::now() - Duration::from_secs(2));
+        state.is_processing = true;
+        state.is_streaming = true;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(!state.should_exit);
+        assert!(state.is_processing);
+        assert!(state.cancelling_since.is_none());
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.should_exit);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_twice_during_cancellation_requests_abort_once_then_exits() {
+        let mut state = ChatState::test_fixture();
+        let (tx, mut rx) = mpsc::channel(4);
+        state.is_streaming = true;
+        state.is_processing = true;
+
+        for _ in 0..2 {
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(state.should_exit, "第二次 Ctrl+C 应退出，而非再次取消");
+        assert!(matches!(rx.try_recv(), Ok(AgentRequest::Abort)));
+        assert!(rx.try_recv().is_err(), "同一回合只应发送一次 Abort");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_copy_failure_clears_exit_window_without_aborting() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history.clear();
+        state.is_processing = true;
+        state.last_ctrl_c = Some(Instant::now());
+        state.text_selection.start = Some((0, 0));
+        state.text_selection.end = Some((0, 1));
+        state.text_selection.start_entry_idx = Some(99);
+        state.text_selection.end_entry_idx = Some(99);
+        let (tx, mut rx) = mpsc::channel(4);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!state.should_exit);
+        assert!(state.last_ctrl_c.is_none());
+        assert!(state.text_selection.has_selection());
+        assert!(state.is_processing);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_done_preserves_exit_window_and_unsubmitted_draft() {
+        let mut state = ChatState::test_fixture();
+        state.is_processing = true;
+        state.is_streaming = true;
+        state.set_input_text("unfinished draft");
+        state.paste_segments.push(crate::ui::state::PasteSegment {
+            id: 0,
+            content: "pasted text".into(),
+            line_count: 1,
+            kind: crate::ui::state::PasteKind::Text,
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(AgentRequest::Abort)));
+        crate::ui::services::stream::handle_stream_update(
+            &mut state,
+            crate::runtime::messages::StreamMessage::Done { message_id: 1 },
+            &tx,
+        )
+        .await
+        .unwrap();
+        handle_key_event(&mut state, key, &tx, None).await.unwrap();
+        assert!(state.should_exit);
+        assert_eq!(state.input, "unfinished draft");
+        assert_eq!(state.paste_segments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_in_background_agent_view_requests_its_stop_and_returns_to_main() {
+        let mut state = ChatState::test_fixture();
+        let (tx, mut rx) = mpsc::channel(4);
+        crate::ui::services::stream::handle_stream_update(
+            &mut state,
+            crate::runtime::messages::StreamMessage::AgentTaskUpdate {
+                message_id: 1,
+                task_id: "bg-task".into(),
+                agent_type: "Explore".into(),
+                description: "inspect".into(),
+                status: crate::types::AgentTaskStatus::Running,
+                tool_use_count: 0,
+                tokens: 0,
+                is_async: true,
+                is_resolved: false,
+                is_error: false,
+                last_tool_info: None,
+                name: None,
+                task_description: None,
+                new_sub_entries: Vec::new(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        state.enter_teammate_view("bg-task");
+
+        let responder = tokio::spawn(async move {
+            if let Some(AgentRequest::StopBackgroundAgent { task_id }) = rx.recv().await {
+                assert_eq!(task_id, "bg-task");
+            } else {
+                panic!("Ctrl+C should send a targeted background-task stop");
+            }
+        });
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        responder.await.unwrap();
+
+        assert!(state.viewing_agent_task_id.is_none());
+        assert!(state.auto_follow);
+        assert!(
+            state.last_ctrl_c.is_some(),
+            "the return press starts the exit window"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_when_agent_queue_is_full_stays_responsive_and_can_still_exit() {
+        let mut state = ChatState::test_fixture();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(AgentRequest::McpRefresh)
+            .expect("fill the request queue");
+        state.is_streaming = true;
+        state.is_processing = true;
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.is_processing,
+            "failed enqueue must not fake cancellation"
+        );
+        assert!(state.cancelling_since.is_none());
+
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(state.should_exit, "the second press must remain responsive");
+        assert!(matches!(rx.try_recv(), Ok(AgentRequest::McpRefresh)));
+        assert!(
+            rx.try_recv().is_err(),
+            "no duplicate Abort should be queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_double_press_is_not_swallowed_by_search_or_inline_confirmations() {
+        for context in [
+            "chat_search",
+            "clear_confirmation",
+            "paste_confirmation",
+            "model_confirmation",
+            "tool_confirmation",
+            "palette",
+        ] {
+            let mut state = ChatState::test_fixture();
+            match context {
+                "chat_search" => state.chat_search.active = true,
+                "clear_confirmation" => state.show_clear_confirmation = true,
+                "paste_confirmation" => state.show_paste_confirmation = true,
+                "model_confirmation" => state.pending_model_confirmation = true,
+                "tool_confirmation" => state.is_awaiting_confirmation = true,
+                "palette" => state.push_modal(crate::ui::state::modal::Modal::Palette),
+                _ => unreachable!(),
+            }
+            let (tx, _rx) = mpsc::channel(4);
+            for _ in 0..2 {
+                handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    &tx,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(state.should_exit, "Ctrl+C must remain global in {context}");
+        }
     }
 
     /// 取消流式输出的宽限期内，用户输入新需求不应被排队。

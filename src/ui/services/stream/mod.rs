@@ -1604,6 +1604,23 @@ pub async fn handle_stream_update(
                 },
             );
         }
+        StreamMessage::BackgroundAgentStopResult { task_id, result } => {
+            let (message, kind) = match result {
+                Ok(true) => (
+                    crate::core::i18n::t1("agent.stop.requested"),
+                    crate::ui::state::store::ToastKind::Info,
+                ),
+                Ok(false) => (
+                    crate::core::i18n::t1("agent.stop.not_cancellable"),
+                    crate::ui::state::store::ToastKind::Info,
+                ),
+                Err(error) => (
+                    crate::core::i18n::t1("agent.stop.failed").replace("{error}", &error),
+                    crate::ui::state::store::ToastKind::Error,
+                ),
+            };
+            state.push_toast(&message.replace("{task}", &task_id), kind);
+        }
     }
     Ok(())
 }

@@ -496,6 +496,35 @@ mod tests {
     }
 
     #[test]
+    fn distinct_same_name_calls_are_not_deduplicated_when_finishing_in_reverse() {
+        let mut tracker = AgentProgressTracker::new(None);
+        let call = |id: &str| crate::types::StarToolCall {
+            id: id.into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "Read".into(),
+                arguments: r#"{"file_path":"same.rs"}"#.into(),
+            },
+        };
+        let result = crate::types::ToolResult {
+            success: true,
+            output: Some("same content".into()),
+            error: None,
+            data: None,
+            llm_content: None,
+        };
+        let a = call("a");
+        let b = call("b");
+        tracker.on_tool_started(&a);
+        tracker.on_tool_started(&b);
+        tracker.on_tool_finished(&b, &result);
+        tracker.on_tool_finished(&a, &result);
+        tracker.on_tool_finished(&a, &result);
+        assert_eq!(tracker.tool_use_count(), 2);
+        assert_eq!(tracker.entries.len(), 4);
+    }
+
+    #[test]
     fn trailing_search_reads_collapse_into_summary() {
         let mut t = AgentProgressTracker::new(None);
         let call = |id: &str, name: &str| crate::types::StarToolCall {

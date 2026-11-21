@@ -75,6 +75,41 @@ pub(super) async fn persist_session_on_exit(
     }
 }
 
+/// 保存、Shutdown 回执与 worker 收尾共用一个退出预算，不限制工具审批等待。
+///
+/// 超时只取消本进程的 worker task，让调用方继续恢复终端；未收到完整回执时
+/// 不返回保存成功的提示。正常路径仍由 worker 按 FIFO 保存后执行 SessionEnd。
+pub(super) async fn finish_worker_on_exit(
+    save: impl std::future::Future<Output = Option<String>>,
+    mut worker: tokio::task::JoinHandle<()>,
+    budget: Duration,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let saved_session_id = match tokio::time::timeout_at(deadline, save).await {
+        Ok(saved) => saved,
+        Err(_) => {
+            crate::utils::logging::append_debug_log_line(
+                "[SESSION] Exit budget exhausted; session save/shutdown was not acknowledged",
+            );
+            worker.abort();
+            return None;
+        }
+    };
+    match tokio::time::timeout_at(deadline, &mut worker).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => crate::utils::logging::append_debug_log_line(&format!(
+            "[Worker] Agent worker task failed during shutdown: {error}",
+        )),
+        Err(_) => {
+            crate::utils::logging::append_debug_log_line(
+                "[Worker] Exit budget exhausted while joining agent worker",
+            );
+            worker.abort();
+        }
+    }
+    saved_session_id
+}
+
 /// 将启动阶段加载的持久化 display 状态装回新的 UI state。
 ///
 /// 欢迎条目属于当前 TUI 进程，不能由旧快照替换；provider usage 则只恢复最近一次真实

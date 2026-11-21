@@ -1,6 +1,42 @@
 //! handle_stream_update 的测试。
 
 #[tokio::test]
+async fn background_stop_result_reports_success_finished_and_failure() {
+    let (agent_tx, _agent_rx) = mpsc::channel(2);
+    let mut state = ChatState::test_fixture();
+    for (result, expected) in [
+        (
+            Ok(true),
+            crate::core::i18n::t1("agent.stop.requested").replace("{task}", "agent-a"),
+        ),
+        (
+            Ok(false),
+            crate::core::i18n::t1("agent.stop.not_cancellable").replace("{task}", "agent-a"),
+        ),
+        (
+            Err("registry unavailable".to_string()),
+            crate::core::i18n::t1("agent.stop.failed")
+                .replace("{task}", "agent-a")
+                .replace("{error}", "registry unavailable"),
+        ),
+    ] {
+        state.toast_queue.clear();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::BackgroundAgentStopResult {
+                task_id: "agent-a".into(),
+                result,
+            },
+            &agent_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.toast_queue.len(), 1);
+        assert_eq!(state.toast_queue[0].message, expected);
+    }
+}
+
+#[tokio::test]
 async fn text_deltas_clear_completed_analysis_and_preserve_repeated_text() {
     let mut state = ChatState::test_fixture();
     state.chat_history.clear();
@@ -1168,6 +1204,151 @@ fn tool_result_insert_before_agent_keeps_progress_on_its_own_card() {
         Some("worker-1")
     );
     assert_eq!(state.chat_history[1].entry_type, ChatEntryType::ToolResult);
+}
+
+#[test]
+fn teammate_tool_results_stay_paired_by_call_id_across_updates() {
+    use crate::types::{ChatEntry, ChatEntryType, EntryStatus, StarToolCall, StarToolCallFunction};
+
+    let call = |id: &str| StarToolCall {
+        id: id.into(),
+        call_type: "function".into(),
+        function: StarToolCallFunction {
+            name: "Read".into(),
+            arguments: format!(r#"{{"file_path":"{id}.rs"}}"#),
+        },
+    };
+    let result = |success, output: &str| ToolResult {
+        success,
+        output: Some(output.into()),
+        error: (!success).then(|| output.into()),
+        data: None,
+        llm_content: None,
+    };
+    let update = |new_sub_entries| AgentTaskUpdateArgs {
+        task_id: "paired-agent".into(),
+        agent_type: "Explore".into(),
+        description: "inspect files".into(),
+        status: crate::types::AgentTaskStatus::Running,
+        tool_use_count: 2,
+        tokens: 0,
+        is_async: true,
+        is_resolved: false,
+        is_error: false,
+        last_tool_info: None,
+        name: None,
+        task_description: None,
+        new_sub_entries,
+    };
+
+    let mut state = ChatState::test_fixture();
+    handle_agent_task_update(
+        &mut state,
+        update(vec![
+            ChatEntry::tool_call("", call("call-a")),
+            ChatEntry::tool_call("", call("call-b")),
+            ChatEntry::assistant("interleaved progress"),
+        ]),
+    );
+    handle_agent_task_update(
+        &mut state,
+        update(vec![
+            ChatEntry::tool_call("replayed call", call("call-a")),
+            ChatEntry::tool_result("result B", call("call-b"), result(false, "B failed")),
+            ChatEntry::tool_result("result A", call("call-a"), result(true, "A ok")),
+            ChatEntry::tool_result("duplicate B", call("call-b"), result(false, "B failed")),
+        ]),
+    );
+
+    let info = &state.active_agent_tasks["paired-agent"];
+    let transcript: Vec<_> = info
+        .sub_entries
+        .iter()
+        .filter_map(|entry| {
+            let call = entry.tool_call.as_ref()?;
+            Some((entry.entry_type.clone(), call.id.as_str()))
+        })
+        .collect();
+    assert_eq!(
+        transcript,
+        vec![
+            (ChatEntryType::ToolCall, "call-a"),
+            (ChatEntryType::ToolResult, "call-a"),
+            (ChatEntryType::ToolCall, "call-b"),
+            (ChatEntryType::ToolResult, "call-b"),
+        ],
+        "并发结果应贴回各自调用，重复结果不得产生额外条目"
+    );
+    assert!(info
+        .sub_entries
+        .iter()
+        .any(|entry| entry.content == "interleaved progress"));
+    assert_eq!(
+        info.sub_entries[2].status,
+        Some(EntryStatus::SoftError),
+        "失败结果应在对应子代理工具调用上显式标记"
+    );
+    let mirror = state.chat_history[info.entry_idx]
+        .agent_sub_entries
+        .as_ref()
+        .expect("standalone agent history mirrors its transcript");
+    assert_eq!(mirror.len(), info.sub_entries.len());
+    assert_eq!(
+        mirror[3].tool_call.as_ref().map(|call| call.id.as_str()),
+        Some("call-b")
+    );
+}
+
+#[test]
+fn teammate_result_arriving_before_call_is_repaired_without_losing_text() {
+    use crate::types::{ChatEntry, ChatEntryType, StarToolCall, StarToolCallFunction};
+
+    let call = StarToolCall {
+        id: "late-call".into(),
+        call_type: "function".into(),
+        function: StarToolCallFunction {
+            name: "Grep".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let update = |new_sub_entries| AgentTaskUpdateArgs {
+        task_id: "late-agent".into(),
+        agent_type: "Explore".into(),
+        description: "search".into(),
+        status: crate::types::AgentTaskStatus::Running,
+        tool_use_count: 1,
+        tokens: 0,
+        is_async: true,
+        is_resolved: false,
+        is_error: false,
+        last_tool_info: None,
+        name: None,
+        task_description: None,
+        new_sub_entries,
+    };
+    let mut state = ChatState::test_fixture();
+    let mut result = ChatEntry::tool_result(
+        "found match",
+        call.clone(),
+        ToolResult {
+            success: true,
+            output: Some("found match".into()),
+            error: None,
+            data: None,
+            llm_content: None,
+        },
+    );
+    result.status = Some(crate::types::EntryStatus::Success);
+    handle_agent_task_update(
+        &mut state,
+        update(vec![result, ChatEntry::assistant("progress survives")]),
+    );
+    handle_agent_task_update(&mut state, update(vec![ChatEntry::tool_call("", call)]));
+
+    let entries = &state.active_agent_tasks["late-agent"].sub_entries;
+    assert_eq!(entries[0].entry_type, ChatEntryType::ToolCall);
+    assert_eq!(entries[1].entry_type, ChatEntryType::ToolResult);
+    assert_eq!(entries[2].content, "progress survives");
 }
 
 #[test]

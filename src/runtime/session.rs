@@ -91,6 +91,7 @@ pub struct StreamingRequestContext<'a> {
     pub steering_queue: &'a Arc<AsyncMessageQueue<(u64, crate::types::UserInput)>>,
     pub steering_signal: &'a Arc<Notify>,
     pub message_bus: &'a Arc<crate::core::confirmation_bus::MessageBus>,
+    pub(crate) subagent_tasks: Option<crate::agent::subagent::tasks::SharedSubagentTasks>,
     /// 运行中切模型的交接槽。回合跑起来之后 `StarAgent` 是被独占借出的，
     /// 运行时够不到它的 client —— 靠这个槽把用户选中的模型递进去。
     pub model_switch_cell: &'a crate::agent::model_switch::ModelSwitchCell,
@@ -129,6 +130,17 @@ pub async fn handle_streaming_request(
                 })
                 .await;
             StreamingRequestOutcome::Abort
+        }
+        Some(AgentRequest::StopBackgroundAgent { task_id }) => {
+            let result = match context.subagent_tasks.as_ref() {
+                Some(tasks) => tasks.lock().await.request_stop(&task_id),
+                None => Err("Background task registry unavailable".to_string()),
+            };
+            let _ = context
+                .tx
+                .send(StreamMessage::BackgroundAgentStopResult { task_id, result })
+                .await;
+            StreamingRequestOutcome::Continue
         }
         Some(AgentRequest::Shutdown { response }) => {
             // 不直接丢掉 outer stream：它负责接收 agent loop 的最终 session_messages。
@@ -851,6 +863,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stopping_a_background_agent_does_not_abort_the_lead_turn() {
+        let mut deferred = DeferredRuntimeActions::default();
+        let (tx, mut rx) = mpsc::channel(2);
+        let steering_queue = Arc::new(AsyncMessageQueue::new());
+        let steering_signal = Arc::new(Notify::new());
+        let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+            crate::core::policy::PolicyEngine::new(Default::default()),
+            false,
+        ));
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let model_switch_cell = crate::agent::model_switch::new_cell();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let tasks = Arc::new(tokio::sync::Mutex::new(
+            crate::agent::subagent::tasks::SubagentTasks::default(),
+        ));
+        {
+            let mut registry = tasks.lock().await;
+            registry.register("background-a", "scan".into(), "unused.txt".into());
+            registry.attach_cancel("background-a", cancel_flag.clone());
+        }
+        let outcome = handle_streaming_request(
+            &mut deferred,
+            Some(AgentRequest::StopBackgroundAgent {
+                task_id: "background-a".into(),
+            }),
+            StreamingRequestContext {
+                tx: &tx,
+                message_id: 7,
+                user_message: "lead turn remains active",
+                current_model_snapshot: "model-a",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+                subagent_tasks: Some(tasks),
+                model_switch_cell: &model_switch_cell,
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, StreamingRequestOutcome::Continue);
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamMessage::BackgroundAgentStopResult {
+                task_id,
+                result: Ok(true),
+            }) if task_id == "background-a"
+        ));
+        assert!(cancel_flag.load(Ordering::SeqCst));
+        assert!(!abort_flag.load(Ordering::SeqCst));
+    }
+
     /// 运行中切模型：改动要被递进共享槽 —— 运行中的回合靠它在下一次请求前换上
     /// 新模型（Claude Code / OpenCode 的做法）。原来这里只排队等轮末生效，于是
     /// "切不动"：一轮跑得久、或者卡住时，切换就一直不落地。
@@ -895,6 +961,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                subagent_tasks: None,
                 model_switch_cell: &model_switch_cell,
             },
         )
@@ -941,6 +1008,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                subagent_tasks: None,
                 model_switch_cell: &model_switch_cell,
             },
         )
@@ -993,6 +1061,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                subagent_tasks: None,
                 model_switch_cell: &model_switch_cell,
             },
         )
@@ -1040,6 +1109,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                subagent_tasks: None,
                 model_switch_cell: &model_switch_cell,
             },
         )
@@ -1080,6 +1150,7 @@ mod tests {
                 steering_queue: &steering_queue,
                 steering_signal: &steering_signal,
                 message_bus: &message_bus,
+                subagent_tasks: None,
                 model_switch_cell: &model_switch_cell,
             },
         )

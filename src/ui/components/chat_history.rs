@@ -704,3 +704,72 @@ pub(crate) fn render_entry_lines(
 
     entry_lines
 }
+
+#[cfg(test)]
+mod teammate_view_tests {
+    use super::*;
+
+    #[test]
+    fn teammate_detail_renders_one_call_header_and_its_result_at_varied_widths() {
+        let call = crate::types::StarToolCall {
+            id: "detail-read-1".into(),
+            call_type: "function".into(),
+            function: crate::types::StarToolCallFunction {
+                name: "mcp__demo__inspect".into(),
+                arguments: r#"{"query":"read the main file"}"#.into(),
+            },
+        };
+        let result = crate::types::ToolResult {
+            success: true,
+            output: Some("result visible".into()),
+            error: None,
+            data: None,
+            llm_content: None,
+        };
+        let mut call_entry = crate::types::ChatEntry::tool_call("", call.clone());
+        call_entry.status = Some(crate::types::EntryStatus::Success);
+        call_entry.is_streaming = Some(false);
+        let info = crate::ui::state::store::AgentTaskInfo {
+            task_id: "detail-agent".into(),
+            agent_type: "Explore".into(),
+            description: "inspect a file".into(),
+            status: crate::types::AgentTaskStatus::Completed,
+            tool_use_count: 1,
+            tokens: 0,
+            is_async: true,
+            is_resolved: true,
+            is_error: false,
+            last_tool_info: None,
+            name: None,
+            task_description: None,
+            started_at: std::time::Instant::now(),
+            finished_at: Some(std::time::Instant::now()),
+            sub_entries: vec![
+                call_entry,
+                crate::types::ChatEntry::tool_result("", call, result),
+            ],
+            entry_idx: 0,
+        };
+        let mut state = ChatState::test_fixture();
+        state.viewing_agent_task_id = Some("detail-agent".into());
+        state.active_agent_tasks.insert("detail-agent".into(), info);
+
+        for width in [24, 44, 96] {
+            let lines = render_teammate_view(&state, width).expect("teammate detail view");
+            let text = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert_eq!(
+                text.matches("mcp__").count(),
+                1,
+                "the call label appears once at width={width}: {text}"
+            );
+            assert!(
+                text.contains("result visible"),
+                "tool result remains visible at width={width}: {text}"
+            );
+        }
+    }
+}

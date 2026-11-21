@@ -347,7 +347,7 @@ pub async fn run_ui_loop(
     crate::utils::logging::append_debug_log_line("[UI] Event loop started");
     loop {
         // Check exit flag
-        if state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state) {
+        if state.should_exit {
             break Ok(());
         }
 
@@ -357,10 +357,8 @@ pub async fn run_ui_loop(
         const MAX_KEY_EVENTS_PER_TICK: usize = 64;
         let mut key_event_count = 0;
         loop {
-            // 退出前正在等恢复回执时，仍需允许处理旧回合的确认或中断。
-            if (state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state))
-                || key_event_count >= MAX_KEY_EVENTS_PER_TICK
-            {
+            // 用户已确认退出时不再等待恢复回执；收尾阶段会跳过不匹配的快照。
+            if state.should_exit || key_event_count >= MAX_KEY_EVENTS_PER_TICK {
                 break;
             }
             // 先取尾部 async 等待时已经收到的事件，再取键盘线程新投递的。
@@ -384,7 +382,11 @@ pub async fn run_ui_loop(
                     Event::Key(key) => {
                         if key.kind != KeyEventKind::Release {
                             let (norm_code, norm_mods) = normalize_key(key.code, key.modifiers);
-                            let norm_key = crossterm::event::KeyEvent::new(norm_code, norm_mods);
+                            let norm_key = crossterm::event::KeyEvent {
+                                code: norm_code,
+                                modifiers: norm_mods,
+                                ..key
+                            };
                             crate::ui::events::input::handle_key_event(
                                 state,
                                 norm_key,
@@ -705,7 +707,7 @@ pub async fn run_ui_loop(
         {
             needs_redraw |= crate::ui::services::session_restore::worker_disconnected(state);
         }
-        if state.should_exit && !crate::ui::services::session_restore::awaiting_worker(state) {
+        if state.should_exit {
             break Ok(());
         }
 
@@ -1219,16 +1221,15 @@ pub async fn run_app(
     // Run UI loop
     let res = run_ui_loop(&mut terminal, &mut state, agent_tx, ui_rx).await;
 
-    // Ordered worker requests save the canonical native context before the worker runs its sole
-    // SessionEnd epilogue. Even a save error still waits for shutdown acknowledgement.
-    let saved_session_id = persist_session_on_exit(&config, &state, &lifecycle_tx).await;
+    // 正常路径按序保存原生上下文并执行 SessionEnd；退出专属总预算覆盖入队、
+    // 回执与 join，避免 worker 失联时永远无法恢复终端，不影响运行中的审批等待。
+    let saved_session_id = finish_worker_on_exit(
+        persist_session_on_exit(&config, &state, &lifecycle_tx),
+        worker_handle,
+        Duration::from_secs(10),
+    )
+    .await;
     drop(lifecycle_tx);
-    if let Err(error) = worker_handle.await {
-        crate::utils::logging::append_debug_log_line(&format!(
-            "[Worker] Agent worker task failed during shutdown: {}",
-            error
-        ));
-    }
 
     // Cleanup
     #[cfg(windows)]

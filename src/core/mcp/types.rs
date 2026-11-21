@@ -3,6 +3,29 @@ use std::collections::HashMap;
 
 pub type McpError = Box<dyn std::error::Error + Send + Sync>;
 
+/// MCP JSON-RPC 层返回的错误。
+///
+/// 这是协议错误而不是传输错误。调用方不能把它当作连接断开来重连并
+/// 重发：服务端已经收到请求，重发可能重复执行非幂等工具。
+#[derive(Debug)]
+pub struct McpJsonRpcError {
+    pub code: Option<i64>,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
+}
+
+impl std::fmt::Display for McpJsonRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mcp jsonrpc error: {}", self.message)?;
+        if let Some(code) = self.code {
+            write!(f, " (code {code})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for McpJsonRpcError {}
+
 /// 保留调用失败与重连失败的两段原因，供 server 和 manager 共用。
 pub(super) fn join_call_and_reconnect_errors(
     call_err: &McpError,

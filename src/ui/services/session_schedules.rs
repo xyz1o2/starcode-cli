@@ -258,7 +258,7 @@ mod tests {
             let guard = ENV_LOCK
                 .get_or_init(|| std::sync::Mutex::new(()))
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .expect("schedule test environment lock poisoned");
             let path = std::env::temp_dir().join(format!(
                 "starcode-schedule-{}-{}.json",
                 tag,
@@ -349,24 +349,77 @@ mod tests {
 
     #[tokio::test]
     async fn queued_command_is_not_overtaken_by_due_schedule() {
+        let store = TestTriggerStore::new("queued-command-priority");
+        let id = trigger_scheduler::add_trigger_at(&store.path, "scheduled prompt", 3_600);
         let mut state = ChatState::test_fixture();
         let (agent_tx, mut agent_rx) = mpsc::channel(1);
         state
             .pending_user_messages
-            .push_back(crate::types::UserInput::command_eligible(
-                "/schedule remove pending-id".into(),
-            ));
+            .push_back(crate::types::UserInput::command_eligible(format!(
+                "/schedule remove {}",
+                id
+            )));
+        state
+            .session_schedules
+            .mark_taken_for_test(store.path.clone(), &id, "scheduled prompt");
+
+        assert!(!poll(&mut state, &agent_tx));
+        assert!(agent_rx.try_recv().is_err());
+        assert!(state.session_schedules.pending.is_none());
+        assert_eq!(state.session_schedules.rx.len(), 1);
+        assert!(state
+            .pending_user_messages
+            .front()
+            .is_some_and(|input| input.text == format!("/schedule remove {}", id)));
+
+        let queued = state
+            .pending_user_messages
+            .pop_front()
+            .expect("queued command exists");
+        run_remove(
+            &mut state,
+            &agent_tx,
+            queued.text.split_whitespace().last().expect("id"),
+        )
+        .await;
+        assert!(state.pending_user_messages.is_empty());
+        assert!(!poll(&mut state, &agent_tx));
+        assert!(agent_rx.try_recv().is_err());
+        assert!(state.chat_history.iter().any(|entry| {
+            entry.entry_type == crate::types::ChatEntryType::Assistant
+                && entry.content == format!("Removed trigger `{}`.", id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn due_schedule_is_delivered_after_queued_input_is_cleared() {
+        let mut state = ChatState::test_fixture();
+        let (agent_tx, mut agent_rx) = mpsc::channel(1);
+        state
+            .pending_user_messages
+            .push_back(crate::types::UserInput::command_eligible("/help".into()));
         state
             .session_schedules
             .mark_due_for_test("due-id", "scheduled prompt");
 
         assert!(!poll(&mut state, &agent_tx));
         assert!(agent_rx.try_recv().is_err());
-        assert!(state.session_schedules.pending.is_some());
-        assert!(state
-            .pending_user_messages
-            .front()
-            .is_some_and(|input| { input.text == "/schedule remove pending-id" }));
+
+        state.pending_user_messages.clear();
+        assert!(poll(&mut state, &agent_tx));
+        assert!(matches!(
+            agent_rx.try_recv(),
+            Ok(AgentRequest::SendMessage { message, .. }) if message == "scheduled prompt"
+        ));
+        assert!(state.chat_history.iter().any(|entry| {
+            entry.entry_type == crate::types::ChatEntryType::User
+                && entry.content == "scheduled prompt"
+        }));
+        assert!(
+            !poll(&mut state, &agent_tx),
+            "due event must only be delivered once"
+        );
+        assert!(agent_rx.try_recv().is_err());
     }
 
     #[tokio::test]

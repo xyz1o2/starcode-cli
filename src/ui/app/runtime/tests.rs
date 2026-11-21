@@ -5,6 +5,96 @@ use super::*;
 use super::*;
 use crate::types::ChatEntry;
 
+#[tokio::test]
+async fn exit_shutdown_without_acknowledgements_stops_waiting_at_budget() {
+    let (tx, mut rx) = mpsc::channel(2);
+    let worker = tokio::spawn(async move {
+        // 假 worker 保持回执通道存活但不回应，复现原来的无限等待。
+        let save = rx.recv().await.expect("save request");
+        let shutdown = rx.recv().await.expect("shutdown request");
+        assert!(matches!(save, AgentRequest::SaveSession { .. }));
+        assert!(matches!(shutdown, AgentRequest::Shutdown { .. }));
+        std::future::pending::<()>().await;
+        drop((save, shutdown));
+    });
+    let save = async {
+        crate::commands::chat::request_session_save_then_shutdown(
+            &tx,
+            "exit-test".into(),
+            vec![ChatEntry::user("unsaved")],
+            None,
+        )
+        .await
+        .ok()
+        .map(|()| "exit-test".to_string())
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        finish_worker_on_exit(save, worker, Duration::from_millis(20)),
+    )
+    .await
+    .expect("exit must have a finite bound");
+    assert!(result.is_none(), "没有完整回执不能宣称已保存");
+}
+
+#[tokio::test]
+async fn exit_shutdown_preserves_fifo_and_reports_save_errors() {
+    for save_succeeds in [true, false] {
+        let (tx, mut rx) = mpsc::channel(2);
+        let session_end = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = session_end.clone();
+        let worker = tokio::spawn(async move {
+            let Some(AgentRequest::SaveSession { id, response, .. }) = rx.recv().await else {
+                panic!("save must precede shutdown");
+            };
+            assert_eq!(id, "exit-test");
+            response
+                .send(if save_succeeds {
+                    Ok(())
+                } else {
+                    Err("disk full".into())
+                })
+                .await
+                .unwrap();
+            let Some(AgentRequest::Shutdown { response }) = rx.recv().await else {
+                panic!("shutdown must follow save even on failure");
+            };
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            response.send(Ok(())).await.unwrap();
+        });
+        let save = async {
+            crate::commands::chat::request_session_save_then_shutdown(
+                &tx,
+                "exit-test".into(),
+                vec![ChatEntry::user("test")],
+                None,
+            )
+            .await
+            .ok()
+            .map(|()| "exit-test".to_string())
+        };
+        let result = finish_worker_on_exit(save, worker, Duration::from_secs(1)).await;
+        assert_eq!(result.as_deref(), save_succeeds.then_some("exit-test"));
+        assert!(session_end.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn exit_shutdown_join_uses_the_same_deadline() {
+    let worker = tokio::spawn(std::future::pending::<()>());
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        finish_worker_on_exit(
+            async { Some("saved".into()) },
+            worker,
+            Duration::from_millis(20),
+        ),
+    )
+    .await
+    .expect("worker join must not block terminal cleanup");
+    assert_eq!(result.as_deref(), Some("saved"));
+}
+
 /// 真实页面压缩输入区高度后，软换行光标仍须落在边框内。
 #[test]
 fn wrapped_prompt_keeps_cursor_visible_in_short_viewports() {

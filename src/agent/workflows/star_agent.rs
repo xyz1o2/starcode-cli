@@ -81,6 +81,25 @@ impl StarAgent {
         self.inner.config.runtime_agent_hub()
     }
 
+    /// 后台子代理的共享任务注册表，供运行时控制请求定向取消任务。
+    pub(crate) fn runtime_subagent_tasks(
+        &self,
+    ) -> Option<crate::agent::subagent::tasks::SharedSubagentTasks> {
+        self.inner.config.runtime_subagent_tasks()
+    }
+
+    /// 请求停止单个后台子代理，不影响 lead agent 的当前回合。
+    pub(crate) async fn request_stop_background_agent(
+        &self,
+        task_id: &str,
+    ) -> Result<bool, String> {
+        let tasks = self
+            .runtime_subagent_tasks()
+            .ok_or_else(|| "Background task registry unavailable".to_string())?;
+        let result = tasks.lock().await.request_stop(task_id);
+        result
+    }
+
     /// `/subtask`：fork 当前会话并放到后台执行。
     ///
     /// 与普通 AgentTool 后台任务的区别是父会话的 `StarMessage` 会被完整

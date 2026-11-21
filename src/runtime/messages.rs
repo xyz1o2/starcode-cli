@@ -315,6 +315,11 @@ pub enum StreamMessage {
         /// 新增的子消息（追加到现有列表）
         new_sub_entries: Vec<ChatEntry>,
     },
+    /// 后台子代理停止请求处理结果。
+    BackgroundAgentStopResult {
+        task_id: String,
+        result: Result<bool, String>,
+    },
     /// 插件市场后台操作完成：`None` 表示无需提示的成功（如已注册过）
     PluginOpResult {
         message: Option<String>,
@@ -384,6 +389,10 @@ pub enum AgentRequest {
     /// 并且只会在该逻辑回合结束后才影响下一条用户消息。
     UpdateRuntimeSettings(RuntimeSettingsMutation),
     Abort,
+    /// 定向取消一个后台代理，不中断主代理的当前回合。
+    StopBackgroundAgent {
+        task_id: String,
+    },
     ListCheckpoints {
         message_id: u64,
     },

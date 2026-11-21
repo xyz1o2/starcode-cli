@@ -1409,47 +1409,35 @@ impl ToolExecutor {
         // - 非空但解析失败 / 解出来不是对象 → 直接报错，指明"参数不完整且
         //   未执行"，这和流式执行器 `streaming_executor::is_call_complete`
         //   对残缺调用的判定（不进执行队列）是同一个闸门的两面。
+        // - 若第一层解出字符串，只接受其中再解析为对象的单层编码形式。
         let raw_args = tool_call.function.arguments.trim();
-        let mut args: Value = if raw_args.is_empty() {
-            Value::Object(serde_json::Map::new())
-        } else {
-            match serde_json::from_str::<Value>(raw_args) {
-                Ok(value @ Value::Object(_)) => value,
-                Ok(Value::Null) => Value::Object(serde_json::Map::new()),
-                Ok(_) | Err(_) => {
-                    let preview: String = raw_args.chars().take(120).collect();
-                    crate::utils::logging::append_debug_log_line(&format!(
-                        "[TOOL_ARGS] refusing to execute `{}`: arguments are not valid JSON \
-                         ({} bytes) — likely a truncated/interrupted stream. preview: {}",
+        let args: Value = match Self::parse_tool_arguments(raw_args) {
+            Ok(args) => args,
+            Err(()) => {
+                let preview: String = raw_args.chars().take(120).collect();
+                crate::utils::logging::append_debug_log_line(&format!(
+                    "[TOOL_ARGS] refusing to execute `{}`: arguments are not valid JSON \
+                     ({} bytes) — likely a truncated/interrupted stream. preview: {}",
+                    tool_call.function.name,
+                    raw_args.len(),
+                    preview
+                ));
+                return ToolResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Tool `{}` was not executed: its arguments could not be parsed as \
+                         JSON ({} bytes). The tool call was most likely truncated by an \
+                         interrupted stream. Do not retry the same call — re-emit the full \
+                         tool call with complete arguments.",
                         tool_call.function.name,
-                        raw_args.len(),
-                        preview
-                    ));
-                    return ToolResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
-                            "Tool `{}` was not executed: its arguments could not be parsed as \
-                             JSON ({} bytes). The tool call was most likely truncated by an \
-                             interrupted stream. Do not retry the same call — re-emit the full \
-                             tool call with complete arguments.",
-                            tool_call.function.name,
-                            raw_args.len()
-                        )),
-                        data: None,
-                        llm_content: None,
-                    };
-                }
+                        raw_args.len()
+                    )),
+                    data: None,
+                    llm_content: None,
+                };
             }
         };
-        // 部分 OpenAI-compatible 提供方把整段 arguments 再套一层 JSON 字符串
-        // （`"arguments": "{\"todos\": […]}"`）。第一层 from_str 会把它解成
-        // `Value::String`，原样下发的话每个工具都收到一个字符串，报
-        // `invalid type: string, expected struct …`——模型重试多少次都一样。
-        // 工具入参的顶层一律是对象，所以只剥「字符串化的 JSON 对象」这一层，
-        // 且必须是合法 JSON；剥不动的原样下发，交给各工具的严格解析报错
-        // （`tasks.rs` 的 strictObject 约定保持不变）。
-        args = Self::unwrap_stringified_args(args);
         let args = self
             .normalize_tool_args(original_tool_name, name, args)
             .await;
@@ -1969,18 +1957,20 @@ impl ToolExecutor {
         crate::core::tools::constants::canonical_tool_name(name)
     }
 
-    /// 剥掉「字符串化的 JSON」一层外壳（见上面的调用点注释）。
-    ///
-    /// 只剥一层、且只在解出来是对象时收手：工具入参顶层永远是对象，解出数字/
-    /// 布尔/裸串说明模型发的本来就不是参数对象，那种情况留给严格解析去报错。
-    fn unwrap_stringified_args(args: Value) -> Value {
-        let Value::String(s) = args else {
-            return args;
-        };
-        match serde_json::from_str::<Value>(&s) {
-            Ok(inner) if inner.is_object() => inner,
-            // 字符串里装的还是字符串（套了两层）或别的——不再猜，原样退回。
-            _ => Value::String(s),
+    /// 解析工具参数并接受最多一层字符串化 JSON 对象。
+    fn parse_tool_arguments(raw_args: &str) -> Result<Value, ()> {
+        if raw_args.is_empty() {
+            return Ok(Value::Object(serde_json::Map::new()));
+        }
+        let value = serde_json::from_str::<Value>(raw_args).map_err(|_| ())?;
+        match value {
+            Value::Object(_) => Ok(value),
+            Value::Null => Ok(Value::Object(serde_json::Map::new())),
+            Value::String(s) => match serde_json::from_str::<Value>(&s) {
+                Ok(inner @ Value::Object(_)) => Ok(inner),
+                _ => Err(()),
+            },
+            _ => Err(()),
         }
     }
 
@@ -1996,6 +1986,12 @@ impl ToolExecutor {
         canonical_name: &str,
         args: Value,
     ) -> Value {
+        // MCP 工具的 schema 由远端服务端定义，参数键和值都必须按协议原样
+        // 透传（例如 Context7 的 `libraryName`，以及数字样的库名）。内建工具的
+        // Rust 参数结构才走下面的本地归一化。
+        if original_name.starts_with("mcp__") {
+            return args;
+        }
         // 先把 camelCase 参数名转为 snake_case：后面两步（schema 保护集、
         // 字符串→数字）都以 canonical 键名为准，顺序不能倒。
         let args = Self::camel_to_snake_keys(args);
@@ -3418,15 +3414,20 @@ async fn execute_mcp_dynamic_tool(
     };
 
     match mcp_manager.call_tool(&server, &tool, arg_payload).await {
-        Ok(value) => ToolResult {
-            success: true,
-            output: Some(
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
-            ),
-            error: None,
-            data: Some(value),
-            llm_content: None,
-        },
+        Ok(value) => {
+            let output = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            let is_error = value
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            ToolResult {
+                success: !is_error,
+                output: if is_error { None } else { Some(output.clone()) },
+                error: if is_error { Some(output) } else { None },
+                data: Some(value),
+                llm_content: None,
+            }
+        }
         Err(e) => ToolResult {
             success: false,
             output: None,
@@ -4215,6 +4216,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn mcp_tool_arguments_preserve_remote_payload_without_rewriting_or_filling_fields() {
+        use crate::core::config::ConfigParameters;
+
+        let temp = tempfile::tempdir().expect("create temporary directory");
+        let mut params = ConfigParameters::default();
+        params.target_dir = temp.path().to_path_buf();
+        params.cwd = temp.path().to_path_buf();
+        let config = Arc::new(Config::new(params));
+        let registry = Arc::new(ToolRegistry::new(config.clone()));
+        let executor = ToolExecutor::new(
+            StarClient::new("", None, None, None, None),
+            registry,
+            None,
+            config,
+        );
+
+        let args = json!({
+            "libraryName": "react",
+            "nestedOptions": {"includeBeta": true},
+            "version": "18",
+        });
+        let normalized = executor
+            .normalize_tool_args(
+                "mcp__context7__resolve-library-id",
+                "mcp__context7__resolve-library-id",
+                args,
+            )
+            .await;
+
+        assert_eq!(normalized["libraryName"], "react");
+        assert!(normalized.get("library_name").is_none());
+        assert_eq!(normalized["nestedOptions"]["includeBeta"], true);
+        assert_eq!(normalized["version"], "18");
+        assert_eq!(normalized.as_object().map(|object| object.len()), Some(3));
+    }
+
     #[test]
     fn panic_messages_are_extracted_from_both_payload_shapes() {
         // `panic!("literal")` → &str
@@ -4257,68 +4295,133 @@ mod tests {
         assert!(should_run_invocation_confirmation(true, true));
     }
 
-    /// 回归：部分 OpenAI-compatible 提供方把整段 arguments 套一层 JSON 字符串。
-    /// 不剥的话每个工具都收到 `Value::String`，TodoWrite 报
-    /// `invalid type: string, expected struct TodoWriteParams`，模型重试无效。
+    #[tokio::test]
+    async fn mcp_executor_preserves_tool_errors_and_never_replays_calls() {
+        use crate::core::config::{ConfigParameters, RuntimeServices};
+        use crate::core::mcp::test_support::{McpFixture, ToolReply};
+        use crate::core::mcp::MCPManager;
+        use crate::core::state::GlobalState;
+        use crate::types::StarToolCallFunction;
+
+        for is_error in [true, false] {
+            let remote_result = json!({
+                "isError": is_error,
+                "content": [{"type": "text", "text": "remote fixture diagnostic"}],
+                "_meta": {"requestTag": "keep-original"}
+            });
+            let fixture = McpFixture::start(ToolReply::Result(remote_result.clone())).await;
+            let manager = Arc::new(MCPManager::new());
+            manager
+                .add_server(fixture.config.clone())
+                .await
+                .expect("register fixture");
+            let temp = tempfile::tempdir().expect("temporary MCP project");
+            let mut config = Config::new(ConfigParameters {
+                target_dir: temp.path().to_path_buf(),
+                cwd: temp.path().to_path_buf(),
+                ..Default::default()
+            });
+            let bus = Arc::new(MessageBus::new(
+                crate::core::policy::PolicyEngine::new(Default::default()),
+                false,
+            ));
+            bus.apply_turn_tool_policy(&["mcp__local-regression__inspect".into()], &[])
+                .await;
+            config.install_runtime_services(RuntimeServices::new(
+                None,
+                bus.clone(),
+                Some(manager),
+                Arc::new(GlobalState::new()),
+            ));
+            let config = Arc::new(config);
+            let registry = Arc::new(ToolRegistry::new(config.clone()));
+            let executor = ToolExecutor::new(
+                StarClient::new("", None, None, None, None),
+                registry,
+                Some(bus),
+                config,
+            );
+            let arguments = json!({
+                "libraryName": "react", "nestedOptions": {"includeBeta": true}, "version": "18"
+            });
+            let call = StarToolCall {
+                id: "mcp-regression".into(),
+                call_type: "function".into(),
+                function: StarToolCallFunction {
+                    name: "mcp__local-regression__inspect".into(),
+                    arguments: arguments.to_string(),
+                },
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                executor.execute(&call, None, None),
+            )
+            .await
+            .expect("MCP executor fixture timed out");
+            assert_eq!(result.success, !is_error, "{:?}", result.error);
+            assert_eq!(result.data.as_ref(), Some(&remote_result));
+            let rendered = if is_error {
+                assert!(result.output.is_none());
+                result.error.as_deref().expect("remote tool error retained")
+            } else {
+                assert!(result.error.is_none());
+                result
+                    .output
+                    .as_deref()
+                    .expect("remote tool output retained")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(rendered).expect("retained JSON result"),
+                remote_result
+            );
+            let requests = fixture.requests().await;
+            let calls: Vec<_> = requests
+                .iter()
+                .filter(|v| v["method"] == "tools/call")
+                .collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["params"]["arguments"], arguments);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|v| v["method"] == "initialize")
+                    .count(),
+                1
+            );
+            fixture.shutdown().await;
+        }
+    }
+
+    /// 回归：真实执行入口解析 provider arguments 时可解一层对象字符串，拒绝其他形态。
     #[test]
-    fn stringified_json_args_are_unwrapped_to_object() {
-        // `"arguments": "{\"todos\": [{…}]}"` → 第一层 from_str 得到 String
-        let inner = r#"{"todos":[{"content":"Run tests","status":"in_progress","activeForm":"Running tests"}]}"#;
-        let args = ToolExecutor::unwrap_stringified_args(Value::String(inner.to_string()));
-        assert!(
-            args.is_object(),
-            "stringified JSON object must be unwrapped"
+    fn tool_argument_parser_unwraps_one_object_string_and_rejects_other_values() {
+        let raw_object = r#"{"libraryName":"react"}"#;
+        let encoded_object = serde_json::to_string(raw_object).expect("encode object string");
+        assert_eq!(
+            ToolExecutor::parse_tool_arguments(&encoded_object).unwrap(),
+            json!({"libraryName": "react"})
         );
-        assert!(args["todos"][0]["activeForm"].as_str() == Some("Running tests"));
+        assert!(ToolExecutor::parse_tool_arguments(r#""[1,2]""#).is_err());
+        assert!(ToolExecutor::parse_tool_arguments(r#""123""#).is_err());
+        let double_encoded = serde_json::to_string(&encoded_object).expect("encode twice");
+        assert!(ToolExecutor::parse_tool_arguments(&double_encoded).is_err());
+        assert!(ToolExecutor::parse_tool_arguments(r#"{"missing": "#).is_err());
     }
 
-    /// 只剥一层：套了两层字符串的不再往下猜，保持原样交给严格解析。
+    /// 真实入口的解码链必须接受一层字符串化对象，并拒绝二层编码。
     #[test]
-    fn double_stringified_args_left_alone() {
-        // 一个 JSON 字符串，里面又装了一个 JSON 字符串
-        let doubly = r#""{\"todos\":[]}"#;
-        let args = ToolExecutor::unwrap_stringified_args(Value::String(doubly.to_string()));
-        assert!(args.is_string(), "do not unwrap past one layer");
-    }
-
-    /// 字符串里装的不是对象（数字/裸串/数组）——工具入参顶层永远是对象，
-    /// 解不出对象就原样退回，由各工具的严格解析报错。
-    #[test]
-    fn non_object_stringified_args_left_alone() {
-        let args = ToolExecutor::unwrap_stringified_args(Value::String("123".to_string()));
-        assert!(args.is_string());
-        let args =
-            ToolExecutor::unwrap_stringified_args(Value::String("just some text".to_string()));
-        assert!(args.is_string());
-        let args = ToolExecutor::unwrap_stringified_args(Value::String("[1, 2]".to_string()));
-        assert!(args.is_string());
-    }
-
-    /// 对象/数组/裸值径直通过，不做任何变形。
-    #[test]
-    fn already_decoded_args_pass_through() {
-        let obj = json!({ "todos": [] });
-        assert_eq!(ToolExecutor::unwrap_stringified_args(obj.clone()), obj);
-        assert_eq!(ToolExecutor::unwrap_stringified_args(json!(42)), json!(42));
-    }
-
-    /// 端到端：`execute()` 的完整解码链（from_str → null→{} → 剥字符串壳 → 工具严格解析）
-    /// 对"字符串化的 arguments"必须走通，否则 TodoWrite 永远报 invalid type: string。
-    #[test]
-    fn decode_chain_parses_stringified_todo_write_payload() {
+    fn decode_chain_accepts_stringified_todo_write_payload() {
         use crate::core::tools::tasks::parse_todo_write_params;
 
-        // 提供方发来的是 `{"todos": [{…}]}` 的**字符串字面量**
-        let raw = r#"{"todos":[{"content":"Run tests","status":"in_progress","activeForm":"Running tests"}]}"#;
-        let mut args = serde_json::from_str::<Value>(raw).expect("outer parse");
-        if args.is_null() {
-            args = Value::Object(serde_json::Map::new());
-        }
-        args = ToolExecutor::unwrap_stringified_args(args);
-
-        let parsed = parse_todo_write_params(&args).expect("TodoWrite must accept unwrapped args");
+        let object = r#"{"todos":[{"content":"Run tests","status":"in_progress","activeForm":"Running tests"}]}"#;
+        let encoded = serde_json::to_string(object).expect("encode object");
+        let args = ToolExecutor::parse_tool_arguments(&encoded).expect("parse encoded object");
+        let parsed = parse_todo_write_params(&args).expect("TodoWrite accepts decoded object");
         assert_eq!(parsed.todos.len(), 1);
         assert_eq!(parsed.todos[0].content, "Run tests");
+
+        let double_encoded = serde_json::to_string(&encoded).expect("encode twice");
+        assert!(ToolExecutor::parse_tool_arguments(&double_encoded).is_err());
     }
 
     type ObservedConfirmation =

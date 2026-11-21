@@ -21,6 +21,12 @@ pub async fn handle_request(
         AgentRequest::Abort => {
             agent.abort();
         }
+        AgentRequest::StopBackgroundAgent { task_id } => {
+            let result = agent.request_stop_background_agent(&task_id).await;
+            let _ = tx
+                .send(StreamMessage::BackgroundAgentStopResult { task_id, result })
+                .await;
+        }
         AgentRequest::WithdrawMessage { message_id } => {
             let _ = tx
                 .send(StreamMessage::MessageWithdrawal {

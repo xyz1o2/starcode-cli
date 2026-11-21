@@ -1156,6 +1156,16 @@ fn turn_elapsed_secs(state: &ChatState) -> Option<u64> {
 pub fn build_status_lines(state: &ChatState, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    let exit_hint_active = state
+        .last_ctrl_c
+        .is_some_and(|pressed| pressed.elapsed() <= std::time::Duration::from_millis(1500));
+    if exit_hint_active {
+        lines.push(Line::from(Span::styled(
+            crate::core::i18n::t1("ui.status.ctrl_c_exit"),
+            crate::ui::themes::theme::muted_style(),
+        )));
+    }
+
     // ── 模型切换确认框：必须**一直**看得见 ──────────────────────────────
     //
     // 它原先只写进 `current_status_line`，而那一行只在**回合进行中**渲染
