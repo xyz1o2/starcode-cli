@@ -1078,36 +1078,21 @@ async fn handle_quick_open(
         Down => {
             state.quick_open_state.move_down();
         }
-        Enter => {
-            // 对标 CCB: Enter 打开外部编辑器（暂无，插入路径）
-            if let Some(file) = state.quick_open_state.selected_file().cloned() {
-                let insert = format!("{} ", file.path);
-                if !state.input.is_empty() && !state.input.ends_with(' ') {
-                    state.input.push(' ');
-                }
-                state.input.push_str(&insert);
-                state.pop_modal();
-            }
-        }
-        Tab => {
-            // 对标 CCB: Tab 插入 mention 格式 @path
-            if let Some(file) = state.quick_open_state.selected_file().cloned() {
-                let insert = format!("@{} ", file.path);
-                if !state.input.is_empty() && !state.input.ends_with(' ') {
-                    state.input.push(' ');
-                }
-                state.input.push_str(&insert);
-                state.pop_modal();
-            }
-        }
-        BackTab => {
-            // 对标 CCB: Shift+Tab 插入纯路径
-            if let Some(file) = state.quick_open_state.selected_file().cloned() {
-                let insert = format!("{} ", file.path);
-                if !state.input.is_empty() && !state.input.ends_with(' ') {
-                    state.input.push(' ');
-                }
-                state.input.push_str(&insert);
+        Enter | Tab | BackTab => {
+            if let Some(file) = state.quick_open_state.selected_file() {
+                let separator = if state.input.is_empty() || state.input.ends_with(' ') {
+                    ""
+                } else {
+                    " "
+                };
+                let prefix = if key.code == Tab { "@" } else { "" };
+                let insert = format!("{separator}{prefix}{} ", file.path);
+                // 保留追加到末尾的语义，不重建编辑器或清除附件与输入意图。
+                state.textarea.cancel_selection();
+                state.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
+                state.textarea.move_cursor(tui_textarea::CursorMove::End);
+                state.textarea.insert_str(insert);
+                crate::ui::events::clipboard_paste::sync_input_from_textarea(state);
                 state.pop_modal();
             }
         }
@@ -1188,11 +1173,16 @@ async fn handle_history_search(
                         )
                     })
                     .nth(entry.index)
-                    .filter(|item| item.entry_type == crate::types::ChatEntryType::User)
-                    .map(|item| crate::types::UserInput {
-                        text: item.content.clone(),
-                        images: item.images.clone(),
-                        intent: item.input_intent,
+                    .map(|item| {
+                        if item.entry_type == crate::types::ChatEntryType::User {
+                            crate::types::UserInput {
+                                text: item.content.clone(),
+                                images: item.images.clone(),
+                                intent: item.input_intent,
+                            }
+                        } else {
+                            item.content.clone().into()
+                        }
                     })
                     .unwrap_or_else(|| entry.content.clone().into());
                 state.set_user_input(input);
@@ -1260,6 +1250,140 @@ fn open_marketplace_source_input(state: &mut ChatState) {
 mod tests {
     use super::*;
     use crate::ui::state::modal::Modal;
+
+    #[tokio::test]
+    async fn quick_open_acceptance_keeps_editor_text_intent_and_attachments_in_sync() {
+        use crate::types::{ImageAttachment, InputIntent, UserInput};
+        use crate::ui::components::highlight::quick_open::FileEntry;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (code, modifiers, inserted) in [
+            (KeyCode::Enter, KeyModifiers::NONE, "src/example.rs "),
+            (KeyCode::Tab, KeyModifiers::NONE, "@src/example.rs "),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, "src/example.rs "),
+        ] {
+            for (draft, intent, with_image) in [
+                ("", InputIntent::CommandEligible, false),
+                ("review", InputIntent::CommandEligible, false),
+                ("/help 检查", InputIntent::Literal, true),
+            ] {
+                let mut state = ChatState::test_fixture();
+                let images = if with_image {
+                    vec![ImageAttachment {
+                        media_type: "image/png".into(),
+                        data: "aW1hZ2U=".into(),
+                        width: 1,
+                        height: 1,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                state.set_user_input(UserInput {
+                    text: draft.into(),
+                    images: images.clone(),
+                    intent,
+                });
+                let before = state.textarea.lines().join("\n");
+                let expected = format!(
+                    "{before}{}{inserted}",
+                    if before.is_empty() || before.ends_with(' ') {
+                        ""
+                    } else {
+                        " "
+                    }
+                );
+                state.open_quick_open();
+                state.quick_open_state.files = vec![FileEntry {
+                    path: "src/example.rs".into(),
+                    name: "example.rs".into(),
+                    size: String::new(),
+                    modified: String::new(),
+                }];
+                let (tx, mut rx) = mpsc::channel(1);
+                crate::ui::events::input::handle_key_event(
+                    &mut state,
+                    KeyEvent::new(code, modifiers),
+                    &tx,
+                    None,
+                )
+                .await
+                .expect("file selection should insert without submitting");
+
+                assert_eq!(state.input, expected, "{code:?} {draft:?}");
+                assert_eq!(
+                    state.textarea.lines().join("\n"),
+                    expected,
+                    "{code:?} {draft:?}"
+                );
+                assert_eq!(state.input_intent, intent);
+                assert_eq!(state.prepared_input().unwrap().images, images);
+                assert!(state.prepared_input().unwrap().text.ends_with(inserted));
+                assert_ne!(state.top_modal(), Some(&Modal::QuickOpen));
+
+                crate::ui::events::input::handle_key_event(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                    &tx,
+                    None,
+                )
+                .await
+                .expect("inserted path should remain editable");
+                assert_eq!(state.input, format!("{expected}q"));
+                assert_eq!(state.input, state.textarea.lines().join("\n"));
+                assert_eq!(state.input_intent, intent);
+                assert_eq!(state.prepared_input().unwrap().images, images);
+                assert!(rx.try_recv().is_err());
+                assert!(state.pending_user_messages.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn history_search_restores_full_text_instead_of_the_display_summary() {
+        use crate::types::{ChatEntry, ChatEntryType, InputIntent};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for role in [ChatEntryType::User, ChatEntryType::Assistant] {
+            let mut state = ChatState::test_fixture();
+            state.chat_history.clear();
+            state.set_input_text("untouched draft");
+            let original = format!("/help {} END-OF-ORIGINAL", "检查长消息 🦀 ".repeat(30));
+            let mut entry = ChatEntry::new(role.clone(), original.clone());
+            entry.input_intent = InputIntent::CommandEligible;
+            state.chat_history.push(entry);
+            state.open_history_search();
+            assert!(!state.history_search_state.results[0]
+                .content
+                .contains("END-OF-ORIGINAL"));
+            let (tx, mut rx) = mpsc::channel(1);
+
+            crate::ui::events::input::handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .expect("history selection should fill the prompt without submitting");
+
+            let restored = state
+                .prepared_input()
+                .expect("restored text should be available");
+            assert_eq!(restored.text, original, "{role:?}");
+            assert_eq!(
+                restored.intent,
+                if role == ChatEntryType::User {
+                    InputIntent::CommandEligible
+                } else {
+                    InputIntent::Literal
+                },
+                "{role:?}"
+            );
+            assert_ne!(state.top_modal(), Some(&Modal::HistorySearch));
+            assert!(rx.try_recv().is_err());
+            assert!(state.pending_user_messages.is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn history_search_restores_the_selected_duplicate_entry_and_its_image() {

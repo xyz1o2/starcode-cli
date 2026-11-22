@@ -174,9 +174,45 @@ pub fn render_history_search(f: &mut Frame, state: &HistorySearchState, area: Re
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+    let prefix: String = s.chars().take(max - 3).collect();
+    format!("{prefix}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_summary_truncation_preserves_unicode_and_ascii_boundaries() {
+        assert_eq!(truncate("short", 100), "short");
+        assert_eq!(truncate("abcde", 5), "abcde");
+        assert_eq!(truncate("abcdef", 5), "ab...");
+        assert_eq!(
+            truncate("检查长消息 🦀 ".repeat(30).as_str(), 100),
+            format!(
+                "{}...",
+                "检查长消息 🦀 "
+                    .repeat(30)
+                    .chars()
+                    .take(97)
+                    .collect::<String>()
+            )
+        );
+        assert_eq!(truncate("🦀🦀🦀🦀🦀🦀", 5), "🦀🦀...");
+        assert_eq!(truncate("检查", 2), "检查");
+        assert_eq!(truncate("", 0), "");
+    }
+
+    #[test]
+    fn history_summary_truncation_handles_limits_shorter_than_the_ellipsis() {
+        for (max, expected) in [(0, ""), (1, "."), (2, ".."), (3, "...")] {
+            assert_eq!(truncate("abcdef", max), expected);
+        }
     }
 }
