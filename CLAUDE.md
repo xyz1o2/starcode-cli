@@ -1,346 +1,186 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件是 StarCode CLI（`starcode-cli`）的仓库级开发指南。只记录当前仍有效、能影响实现或验证方式的约束；易过期的计数、历史事故和已删除文件不在这里维护。
 
-## Project
+## 项目概览
 
-StarCode CLI (`starcode-cli`) — a Rust terminal-UI coding agent (ratatui 0.30 + crossterm + tokio) that talks to OpenAI-compatible and Anthropic-style providers. One crate: lib (`src/lib.rs`) plus one bin (`src/main.rs`), ~280k lines across 731 Rust files in `src/` (measured 2026-11-13; this number drifts fast, recount before quoting it).
+StarCode 是 Rust TUI coding agent，使用 ratatui 0.30、crossterm、tokio，兼容 OpenAI-style 与 Anthropic-style provider。一个 crate：`src/lib.rs` + `src/main.rs`。代码刻意对标 Claude Code；需要匹配终端行为时，可参考 gitignored 的 `study_or_copy_projects/` 副本，但架构基线以 `docs/claude-code-alignment.md` 为准，不要用已过时的 `docs/parity-*.md` 做架构决策。
 
-The codebase is deliberately modeled on Claude Code — comments say "对标 Claude Code" throughout. Read-only reference copies live in `study_or_copy_projects/` (gitignored): `claude-code-main`, `claude-code-rust`, `claude-code-system-prompts-main`, `tuie-main`. Consult them when matching behavior or terminal rendering.
+`docs/` 只放活文档；结案报告、事故记录、一次性计划放 `docs/archive/`，移动时使用 `git mv` 保留历史。
 
-**docs/ 归档规则（2026-11-09 起）：** `docs/` 只放**活文档**（对齐基线、设计内文、当前系统的说明）；结案报告 / 事故记录 / 已实施完的一次性计划移 `docs/archive/`（git mv 保历史）。指向 src 内注释的 `parity-*.md` 一类老引用已随体系下线，见过的那处断链（`modal_input.rs`）已改为文字表述。
-
-**对标文档看 `docs/claude-code-alignment.md`**（2026-10-13 快照，source of truth 是官方文档 v2.1.2xx）。不要用 `docs/parity-*.md` 系列做架构决策：那批文档基于泄漏源码 v2.1.88，已过期，且含已被证伪的「未接线」结论（PolicyEngine、ModelFallbackManager、Workflow）—— 具体作废原因见各文件顶部声明与新文档 §6。`study_or_copy_projects/` 下的副本只适合做 UI 层参考。
-
-## Commands
+## 常用命令与验证
 
 ```bash
-cargo check --all-targets        # fastest correctness gate — use this while iterating
-cargo build --release           # → target/release/starcode-cli
-cargo run                       # start the TUI
+cargo check --all-targets
+cargo build --release
+cargo run
 
-# tests
-cargo test --lib                            # the real suite: 2149 unit tests inside src/
-                                            #   (2026-11-13: 2145 passed / 4 ignored / 0 failed)
-cargo test --lib commands::parity           # one module
-cargo test --lib detects_cargo_verifiers    # one test by name
-cargo test --lib -- --nocapture             # see println! from tests
+cargo test --lib
+cargo test --lib <module-or-test-name>
+cargo test --lib -- --nocapture
 
-# CI gates (.github/workflows/ci.yml) — see "Gate state"
-cargo check --workspace --all-targets --locked   # the real blocking gate
-cargo fmt --all -- --check                       # blocking gate, currently green
-cargo clippy --workspace --all-targets          # advisory in CI, no -D warnings yet
+cargo check --workspace --all-targets --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets
 cargo test --workspace --lib -- --test-threads=1
 cargo test --workspace --doc
 ```
 
-### Gate state — verify, don't assume
+提交前至少运行与改动相关的检查；声称全绿前重新运行对应 gate，不要依赖本文件中的历史结果。lib 测试必须使用 `--test-threads=1`：`utils::checkpoint_manager` 会修改进程级 `STAR_FILE_HISTORY_DIR_OVERRIDE`，并行执行会互相删除状态。CI 的阻塞检查是 locked check、fmt、测试和 build；clippy 当前未启用 `-D warnings`。
 
-- `cargo fmt --check`: **green as of 2026-11-13** (re-verified).
-  Run it before claiming green anyway; earlier notes here were wrong twice.
-- `cargo check --workspace --all-targets --locked`: **green as of 2026-11-13**.
-- `cargo clippy --workspace --all-targets`: 591 warnings on the lib target (436 on the
-  bin target), 0 errors — measured 2026-11-13, most are duplicates. Not gated: CI runs it
-  without `-D warnings`. Scope to your work: `cargo clippy --lib 2>&1 | rg <your_file>`.
-- `cargo test --workspace --lib -- --test-threads=1`: 2145 passed / 4 ignored (2149 total),
-  0 failed, green as of 2026-11-13.
+新测试优先放在被测 `src/` 文件的 `#[cfg(test)] mod tests` 中。Cargo 只把 `tests/` 顶层文件作为 integration target；不要把测试放进未声明的子目录。
 
-`--test-threads=1` is mandatory for the lib tests: `utils::checkpoint_manager` mutates the
-process-global `STAR_FILE_HISTORY_DIR_OVERRIDE`, so parallel tests delete each other's
-state and fail. Six of its tests fail without it.
+## 运行入口与架构
 
-The blocking gates are `cargo check --workspace --all-targets --locked`, the test jobs and
-the build jobs. Once the clippy debt is cleared, add `-- -D warnings` back to the clippy
-step in `ci.yml`.
+### 入口
 
-## Architecture
+- `-p/--prompt` 是 headless 路径：构造 `Config` 与 `StarAgent`，调用 `process_user_message`，输出文本或 JSONL。
+- 交互路径先进入 TUI loading screen，再在 spawned task 中初始化 `Config` 与 `StarAgent`（30 秒超时），通过 `oneshot` 返回。启动异常通常表现为 loading 卡住；查看 `.star/logs/agent.log` 中的 `[INIT]`。
+- `mcp`、`git`、`init`、`doctor` 等 subcommand 绕过上述两条路径。
 
-### Two entry paths (`src/main.rs`)
+### UI 与 agent 通道
 
-- **Headless** (`-p/--prompt`): builds `Config` + `StarAgent` synchronously, calls `StarAgent::process_user_message`, prints JSONL or text. No UI.
-- **Interactive**: enters the TUI *immediately* with a loading screen while `Config::initialize()` + `StarAgent::new()` run in a spawned task under a 30s timeout, arriving over a `oneshot` channel (the startup
-task in `src/main.rs`; line numbers drift, grep `[INIT]`). Startup failures therefore look like a stuck loading screen, not a crash — the `[INIT]` breadcrumbs in `.star/logs/agent.log` are how you diagnose them.
+运行时是两个容量为 100 的 mpsc channel 和一个 agent worker：
 
-Subcommands bypass both paths: `mcp`, `git`, `init`, `doctor`.
-
-### External harness integration
-
-The harness docs (`docs/harness-integration.md`, `docs/harness-testing.md`) were
-deleted (commit `18c5f0c`; git history still has them). The surfaces themselves
-are live code. Driving StarCode from an external process (CI script,
-orchestrator, IDE plugin) has three surfaces:
-
-- **`--output-format stream-json`** — a line-per-event stream of the whole agent
-  process (tool calls, text deltas, token usage, errors) ending in a `result` line
-  carrying usage / cost / `is_error` / `session_id`. The event `type` names are an
-  **external contract** — they are hand-serialized in
-  `src/agent/messaging/events.rs` because serde's internally-tagged enums cannot
-  carry newtype variants.
-- **`.star/remote/inbox.jsonl` → `.star/remote/outbox.jsonl`** — a file-based
-  bidirectional control channel: `send_message` / `approve_tool` / `cancel` /
-  `ping`, with `request_id` pairing. Headless drains it for a few rounds after
-  the main turn (`STAR_REMOTE_DRAIN_SECS`).
-- **`starcode-cli mcp serve`** — StarCode as an MCP server, but exposing only
-  `search_code` / `trace_call_chain`, not the agent tool set.
-
-Two things that look available and are not: `src/core/bridge/` (WebSocket control
-plane; only its config surface is read for `/remote status`, no listener is ever started)
-and `src/sdk/` (since deleted from the tree along with `src/constants/`).
-
-Exercise those surfaces from the TUI input box (`/remote protocol` /
-`/remote status` / `remote send`) or from a second terminal writing
-`.star/remote/inbox.jsonl`; the `PermissionRequest` → `approve_tool` round trip
-lets an external script answer a tool confirmation.
-
-### UI ↔ Agent: two channels, one worker
-
-The entire runtime is two capacity-100 `mpsc` channels (`src/ui/app/runtime.rs:1390`) and one tokio task:
-
-```
-UI  --AgentRequest-->  agent_worker  --StreamMessage-->  UI
+```text
+UI --AgentRequest--> agent_worker --StreamMessage--> UI
 ```
 
-- `src/runtime/messages.rs` — the protocol, and the first file to read. `AgentRequest` (UI→Agent: `SendMessage`, `Abort`, `SetModel`, `GenerateNote`, `PluginOp`, …) and `StreamMessage` (Agent→UI: `TextDelta`, `ToolCalls`, `ToolResult`, `AgentTaskUpdate`, `Done`, …) define every legal interaction between the two halves.
-- `src/ui/services/worker.rs` — `agent_worker` drains `steering_queue` before `rx` so interrupts beat queued input. `SendMessage` goes to `runtime::agent_runtime::process_message`; other control
-requests go to `runtime::agent_runtime::process_control_request` (which fans out through
-`runtime::control_requests`).
-- `src/runtime/` — the seam: `agent_runtime` (per message: preflight hooks → streaming session → after-agent hooks → deferred actions), `streaming_session`, `control_requests`, `confirmation_bridge`, `hooks`, `checkpoints`.
-- `src/ui/services/stream.rs` — `handle_stream_update`, the single `match` translating every `StreamMessage` into `ChatState` mutations, processed by the UI loop in 8ms batches.
+- `src/runtime/messages.rs` 是 UI/agent 协议的首要入口，定义所有 `AgentRequest` 与 `StreamMessage`。
+- `src/ui/services/worker.rs` 先排空 `steering_queue`，因此中断/转向优先于普通队列；消息处理进入 `runtime::agent_runtime`。
+- `src/ui/services/stream.rs::handle_stream_update` 是把每种 `StreamMessage` 转成 `ChatState` 变化的集中匹配点。
+- `src/ui/app/runtime.rs` 负责 tokio 渲染线程、TTY 读键线程、agent task 和 ANR watchdog。不要在 TUI 渲染路径打印；使用 `utils::logging` 的文件日志（默认 `.star/logs/starcode_debug.log` 和 `.star/logs/agent.log`，可由 `STAR_LOG_DIR` 调整，`STAR_LOG_ENABLED=0` 关闭）。
 
-Threading model is documented at `src/ui/app/runtime.rs:1-28`: tokio main thread renders, a dedicated `std::thread` reads keys from `/dev/tty`, the agent worker is a task, plus a watchdog for ANR detection. All UI state is one struct — `ChatState` in `src/ui/state/store.rs`, ~190 public fields (the exact count keeps drifting with every UI refactor; grep it rather than trusting a number).
+外部 harness 的现有接口：
 
-### UI architecture: TEA (Model–Update–View)
+- `--output-format stream-json` 输出工具调用、文本增量、usage、错误，并以 `result` 行结束；事件名称是外部契约，手工序列化在 `src/agent/messaging/events.rs`。
+- `.star/remote/inbox.jsonl` 与 `outbox.jsonl` 支持 `send_message`、`approve_tool`、`cancel`、`ping`，使用 `request_id` 配对。
+- `starcode-cli mcp serve` 只暴露 `search_code` 和 `trace_call_chain`，不是完整 agent tool set。
+- `src/core/bridge/` 当前没有启动 WebSocket listener；不要把它当作已接线的控制面。
 
-`src/ui/` follows the Elm Architecture, ratified here because ratatui officially offers it alongside the Component pattern and this codebase's central key dispatch is already TEA-shaped (`ui/events/key_context.rs::KeyContext` is the update dispatcher). The rule:
+### UI：TEA / Model–Update–View
 
-- **`src/ui/events/`** — Update. Key/mouse in, `ChatState` mutated, nothing drawn.
-- **`src/ui/components/`** — View. Read `ChatState`, draw a buffer. No `handle_*` functions, no key decoding.
-- **`src/ui/services/`** — state machines and logic that Update drives (`stream.rs`, `suggestions.rs`, `worker.rs`, `at_processor.rs`).
-- **`src/ui/state/`** — data plus its own methods.
+- `src/ui/events/`：输入与状态更新，不绘制。
+- `src/ui/components/`：只读 `ChatState` 并绘制，不放 key decoding 或业务 `handle_*`。
+- `src/ui/services/`：由 Update 驱动的状态机和逻辑。
+- `src/ui/state/`：状态数据及其方法。
 
-**A `render_*` function may write exactly two kinds of state**, and nothing else:
+`render_*` 只能写两类状态：布局记忆（如 `last_chat_area`、`last_max_scroll`）和 memoization（如 `rendered_cache`、`virtual_list`）。计时器、模式切换、业务状态迁移必须放在事件循环/tick 或 service 中，不能因为 render 被调用而发生。组件若完整拥有自己的私有状态，可保留组件旁的输入处理；目前例子包括 task panel、theme picker、global search。
 
-1. **Layout memory** — `last_terminal_width`, `last_chat_area`, `last_chat_height`, `last_max_scroll`. ratatui's rendering docs call this out as *the* standard immediate-mode workaround: the view only learns its area at draw time, so it remembers last frame's area and corrects on the next one, at the cost of one frame of drift.
-2. **Memoization** — `rendered_cache`, `virtual_list`, `total_rendered_lines`.
+真实聊天绘制路径是 `render_chat_lines` + `write_lines_to_buffer`；修改 UI 前先确认新文件确实被调用。聊天区域始终比终端少一列，因为最后一列给 scrollbar；不要用“是否可滚动”动态决定宽度。
 
-Anything that is a *business* state machine — a timer, a mode transition, anything deciding what state becomes next — does not belong in a render path, even though `render_*` takes `&mut ChatState`. That signature is deliberate and sanctioned: `List`, `Table`, and `Scrollbar` are `StatefulWidget`s, so ratatui explicitly permits `fn view(model: &mut Model, f: &mut Frame)`.
+## 快照测试
 
-The 1.5s post-interrupt grace period is the worked example. It used to be implemented **twice** — once correctly in `runtime.rs`, once inside `render_chat_lines`, where merely drawing the chat area consumed the timer and cleared `is_streaming`. Both copies are now one block in the event loop. Anything shaped like it belongs on the 1Hz tick alongside `tick_task_panel` / `expire_toasts`, not in a component.
-
-**Component-pattern exception:** a few widgets own genuinely private state, so their input handling stays beside their render code rather than moving to `events/`. That is the officially blessed alternative, not a leak: `task_panel::handle_edit_input`, `theme_picker::handle_theme_picker_input`, `global_search::handle_global_search_input`. Add to this list only for a struct that owns its own state end to end — not as a way to park key handling in `components/`.
-
-Refs: <https://ratatui.rs/concepts/rendering/> (immediate vs retained), <https://ratatui.rs/concepts/application-patterns/the-elm-architecture/> (the `&mut` view sanction), <https://ratatui.rs/concepts/application-patterns/component-architecture/>.
-
-### TUI snapshot tests (`src/ui/test_support/`)
-
-There are two ways to assert what a component *looks* like. Logic assertions stay in the component's own `#[cfg(test)] mod tests`; appearance goes through a snapshot.
+UI 外观测试使用 `src/ui/test_support/`：
 
 ```rust
 use crate::ui::test_support::{assert_lines_render, assert_render, ChatState::test_fixture};
 
-// Components that take a &mut Frame.
 let state = ChatState::test_fixture();
-assert_render!("chat_input_plan_single", 44, 5, |f| {
-    render_input(f, &state, f.area())
-});
-
-// Components that only produce Vec<Line>.
+assert_render!("name", 44, 5, |f| render_input(f, &state, f.area()));
 let lines = render_todo_checklist(&tc, 52, &theme());
-assert_lines_render!("tool_render_todo_checklist", 52, 5, &lines);
+assert_lines_render!("name_lines", 52, 5, &lines);
 ```
 
-Three things to know before writing one:
+- 必须用 `ChatState::test_fixture()`，不要用会读取本机 history/env 的 `ChatState::new()`。
+- 本项目 snapshot 同时编码字符、颜色和 modifier；颜色变化也应产生 diff。
+- 新 baseline 第一次故意失败并打印结果；确认内容后再运行一次。故意更新使用 `UPDATE_SNAPSHOTS=1 cargo test --lib`。
+- 一个测试只创建一个 snapshot；依赖墙钟的 uptime、spinner 等不要做 snapshot，直接断言状态。
 
-- **Use `ChatState::test_fixture()`, never `ChatState::new()`.** `new()` reads `~/.star/history.json` and `STAR_TRANSCRIPT*` from the environment, so a baseline built on it is only valid on the machine that built it. The fixture pins every such field; its doc comment table lists them. `ThemeManager::new()` is already pure (13 hardcoded presets), so themes need no pinning.
-- **Colors are in the baseline.** Ratatui's official `assert_snapshot!(terminal.backend())` serializes characters only (upstream issue ratatui#1402), so a refactor that recolors a selected row passes it silently. Ours encodes each cell's `fg`/`bg`/`modifier` as positional runs, so a recolor is a diff.
-- **A missing baseline fails once on purpose.** It is written to `tests/snapshots/ui/<name>.snap` and the rendered output is printed in the panic, so you read what it actually drew *before* accepting it. A second run turns it green. Deliberate changes go through `UPDATE_SNAPSHOTS=1 cargo test --lib`. Keep one snapshot per test — a test that creates two baselines needs two extra runs to settle.
+## 输入、steering 与 slash command
 
-Still not snapshot-able: anything whose output depends on the wall clock. `session_started_at` is `Instant::now()` and cannot be pinned, so the status bar's uptime and the thinking/spinner timers will not produce a stable baseline. Assert those fields directly instead, until the clock gets a seam.
+`src/ui/app/logic.rs::enqueue_user_message` 是输入总入口：
 
-Refs: <https://ratatui.rs/concepts/snapshots/> (the official recipe, and why it is not enough here).
+- `/` → `commands::handle_command`
+- `!` → `ShellExecutionService`（Plan mode 拒绝）
+- `@` → `at_processor`，内联文件并发送 `MarkFilesAsRead`
+- `#` 是普通 Markdown 文本；memory 必须通过 `/memory add`
 
-### Input routing (`src/ui/app/logic.rs`, `enqueue_user_message`)
+运行中的普通文本走 steering，不是排队：`steer_user_message` → `AgentRequest::SendMessage` → steering queue，在下一 provider turn 注入。命令和 shell 仍进入 `pending_user_messages`。steering 消息必须有自己的 `message_id`；`agent_run.rs` 用 `push_or_merge_user_message` 合并相邻 user turn，避免中断后留下连续 user messages。
 
-Every submitted line funnels through here and is dispatched by prefix before anything reaches the model: `/` → `commands::handle_command`; `!` → direct shell via `ShellExecutionService` (refused in Plan mode); `@` → `at_processor` inlines file contents and fires `MarkFilesAsRead`. A leading `#` is ordinary message text, including Markdown headings; adding memory requires an explicit `/memory add` command. Only then does `AgentRequest::SendMessage` go out.
+steering 会把 assistant 输出切成两半，用户消息插在中间，因此切点必须是 markdown 安全边界。使用 `markdown_parser::split_markdown_at_safe_boundary`：段落边界、fence 外；若位于 fence 内，切到 opening line 之前。不要把列表、表格或 fenced code block 从中间切开。
 
-**While a turn is running, a plain requirement is steered into that turn, not queued.** `steer_user_message` sends it as `AgentRequest::SendMessage`; `runtime/session.rs` routes a mid-turn `SendMessage` into the steering queue, and `agent_loop.rs` drains that queue at each turn boundary, injecting the text as a user-role message. The model sees it on its next call instead of after the whole turn finishes. Commands (`/`, `!`) are exempt — they have their own dispatch paths, so they still queue in `pending_user_messages` and show up in the queued panel above the prompt.
+新增或修改 slash command 必须触及四处：
 
-Two invariants the steering path depends on: the injected message carries its own `message_id` (reusing the running turn's id would make the next turn's `Done` look like a duplicate and get swallowed), and `agent_run.rs` merges a new user turn into a trailing user message (`push_or_merge_user_message`) so a steered message left unanswered by an interrupt cannot leave two consecutive user turns behind.
+1. `src/commands/system.rs` 的 `ALL_COMMANDS` 声明；category 必须属于 help 显示的类别。
+2. 对应 topic module 的实现。
+3. `src/commands/mod.rs` 的 `handle_command` match arm；注意重复 arm 和 `is_declared_pending` arm 的顺序。
+4. 实现后移除 `Pending` category，否则仍会走占位响应。
 
-**The assistant's output gets cut in half at the steering point, and the cut has to land on a markdown boundary.** The user's message goes between the two halves, so a cut in the middle of a fenced code block leaves the first half with an unclosed ` ``` ` — the renderer then treats everything after it, *including the user's own message*, as code. `markdown_parser::split_markdown_at_safe_boundary` picks the cut: at the last paragraph boundary outside any fence, or — when the text is inside a fence — before that fence's opening line, so the code block stays whole in the second half. Lists and tables are never cut either.
+命令签名是 `async fn name(ctx: CommandContext<'_>, args: …) -> CommandResult`。只读命令写 `ctx.state.chat_history`；需要模型时发送 `AgentRequest::SendMessage`；不应进入主上下文的侧输出使用 `GenerateNote`。
 
-> `src/commands/parity.rs` 2026-11-09 分拆为 parity/ 目录：`core / git_github / team_mail / remote / goal_job / memory / skills / ultra / web / diag / trigger` 十一个子模块（主文件只剩 mod 声明 + pub use 转发 + tests）。跨子模块引用走 `crate::commands::parity::core::{push_msg, ask_agent, run, …}`；`commands/mod.rs` 的 match 臂 `parity::lens` 等指向 `/agents`/`/help` 等用户面名称——由于 `pub use *` 转发，这些引用在拆分后无需改动。adding a command 仍按下方四触点走。
+## Tools
 
-### Slash commands — four touch points
+`ToolRegistry` 在 `src/core/tools/tool_registry.rs` 中维护工具及缓存的 `Vec<FunctionDeclaration>`；LLM 看到的是缓存。工具 trait 在 `src/core/tools/tools.rs`：`BaseDeclarativeTool` 和 `ToolInvocation`。
 
-Adding or changing a command means editing all of these:
+注册主要位于 `src/core/config/runtime_bootstrap/`：`core_runtime.rs` 负责文件、搜索、导航类工具，`agent_runtime.rs` 负责需要 LLM 或重依赖的工具；插件通过 `sync_plugin_tools` 注入且不能与 built-in 重名。工具存在于 tree 不代表已接线，使用前 grep constructor 和 bootstrap call site。
 
-1. `src/commands/system.rs` — declare it in `ALL_COMMANDS: &[SlashCommand{name, alt_names, description, category, sub_commands}]`. The `category` string is load-bearing twice: `format_help()` (~line 2154) only prints a hardcoded list of categories, so an unlisted category hides the command from `/help`; and `is_declared_pending()` (~line 1893) treats `category: "Pending"` as "declared but unimplemented".
-2. Implement it in a topic module — `parity.rs` (Claude Code-parity commands), `extended.rs`, `compat.rs`, `permissions.rs`, `plugin.rs`, `provider.rs`, `agents/`, …
-3. `src/commands/mod.rs` — add a `match name` arm in `handle_command`. **Order matters**: the `n if system::is_declared_pending(n)` arm near the end swallows anything still marked Pending, and a duplicate arm earlier in the match silently wins over a later one.
-4. Flip the category off `"Pending"` — otherwise the command is declared and dispatched but still answers with the placeholder.
+内置工具名是 Claude Code 风格的 PascalCase：`Read`、`Write`、`Edit`、`MultiEdit`、`SmartEdit`、`LS`、`Grep`、`Glob`、`Bash`、`Agent`、`Skill`、`TodoWrite`、`AskUserQuestion`、`EnterPlanMode`、`ExitPlanMode`、`TaskGet`、`TaskList`、`TaskUpdate`、`TaskOutput`、`CronCreate`、`CronList`、`CronDelete`、`ToolSearch`、`SendMessage`、`WorkflowTool`、`Mcp*` 等。不要新增 snake_case 别名。
 
-Signature is `async fn name(ctx: CommandContext<'_>, args: …) -> CommandResult`, where `CommandContext { state: &mut ChatState, agent_tx: &Sender<AgentRequest> }` (`src/commands/execution.rs`). Older commands take `Vec<String>`, newer parity ones take `&[String]`; the dispatch arm passes `args` or `&args` to match. Read-only commands push markdown into `ctx.state.chat_history`; commands that need the model send `AgentRequest::SendMessage`, or `GenerateNote` for side-channel output that must not enter the main context.
+`ToolName` (`src/core/tools/constants.rs`) 是唯一真相源：`as_str()` 是注册名，`from_str()` 只接受准确拼写。只有以下两处允许大小写折叠：
 
-### Tools
+- `find_builtin_tool_name`：供人输入工具名时只折叠大小写。
+- `is_core_tool_enabled` 与 hook matcher：配置值比较时不区分大小写。
 
-`ToolRegistry` (`src/core/tools/tool_registry.rs`) is a `HashMap<String, Arc<dyn BaseDeclarativeTool>>` behind a generation counter, with a cached `Vec<FunctionDeclaration>` — that cache is what the LLM sees. Two traits in `src/core/tools/tools.rs`: `BaseDeclarativeTool` (name / description / schema / `create_invocation`) and `ToolInvocation` (`should_confirm_execute` → `execute`).
+`tool_name_consistency` 测试用于防止 schema 名和注册名漂移。
 
-Registration is centralized in `src/core/config/runtime_bootstrap/`: `core_runtime.rs` (file, search, navigation tools, each gated by `is_core_tool_enabled`) and `agent_runtime.rs` (the ~54 needing the LLM client or heavier wiring). Plugin tools are swapped in via `sync_plugin_tools`, which refuses names colliding with built-ins.
+## CodebaseSearch
 
-**Built-in tool names are PascalCase, Claude Code style** (`Read` `Write` `Edit` `MultiEdit` `SmartEdit` `LS` `Grep` `Glob` `Bash` `Agent` `Skill` `TodoWrite` `AskUserQuestion` `EnterPlanMode` `ExitPlanMode` `TaskGet` `TaskList` `TaskUpdate` `TaskOutput` `CronCreate` `CronList` `CronDelete` `ToolSearch` `SendMessage` `WorkflowTool` `Mcp*` …). No snake_case and no `Tool` suffix — `LS`, not `ListDir`; `WorkflowTool` is the one exception because CC itself names it that way.
+`src/core/context/` 的检索是 lexical BM25-style，不是 embedding：tree-sitter AST chunks，co-occurrence lexical、exact lexical、literal ripgrep 三路通过 RRF fusion。CJK 使用 bigram；不要假设中文问题能召回英文 identifier。
 
-`ToolName` (`src/core/tools/constants.rs`) is the single source of truth: `as_str()` is the registered name, `from_str()` accepts only that exact spelling. There is **no alias table** — the old snake_case spellings (`smart_edit`, `multi_edit`, `tool_search`, …) are *not* aliases, and `canonical_tool_name` passes them through unchanged. That is deliberate: keeping them as aliases would mean a user renames a tool while their old config keeps working, and the resulting bug is impossible to diagnose.
+必须保持以下约束：
 
-Two narrow folding rules exist, and neither accepts the old snake_case spelling:
-- `find_builtin_tool_name` folds **case only** (`todowrite` → `TodoWrite`) — used where a human types a tool name (`/permissions add`).
-- `is_core_tool_enabled` and the hook `matcher` compare **case-insensitively** — used where the user wrote a config value.
+- watcher 与 `CodebaseSearchTool` 共享 `search_cache::shared_search_cache()`，否则后台索引不会被工具复用。
+- stopwords 不进入 index，否则高频词会压低真实匹配。
+- `should_trigger_codebase_search_with_flag` 只判断 enabled/attempted/tool presence；query 形状由 `score_rank_locate_route` 决定。"why/explain" 是评分惩罚，不是 veto。
+- 冷索引返回 `Warming` 时，agent 应等待索引后重试，而不是依赖模型自行重试。
 
-`src/core/tools/tool_name_consistency.rs` scans the source and fails if any tool's `fn name()` drifts from the `ToolName` enum — the failure mode there is a model calling a tool that exists in the schema but not in the registry.
+## Prompts、配置与环境变量
 
-Implementations are split between `src/core/tools/` (~60 files) and `src/tools/` (bash, search, todo, git_insight, lsp, …). Presence in the tree does not mean a tool is live — see "Not everything is wired up".
+系统 prompt 和 tool description 在 `src/core/prompts/system-prompts/` 的 `.md` 中，通过 `rust_embed` 内嵌。运行时覆盖顺序为：`STAR_PROMPT_DIR` → `~/.starcode/prompts/` → `./.star/prompts/` → embedded。tool description 的 frontmatter `description:` 进入 schema，文件 body 进入 system prompt；改模型看到的工具说明时编辑 `.md`，并检查 `tool_descriptions.rs` 的 registry-name mapping。
 
-### Code retrieval (`CodebaseSearch`)
+配置路径统一经过 `Storage`，不要手写 `.star` 路径。全局设置是 `~/.star/settings.json`，项目设置是 `./.star/settings.json`；项目上下文优先读取 `STAR.md`、`STARCODE.md`、`CLAUDE.md`，最多注入 8000 字符。
 
-The context engine lives in `src/core/context/` (~9k lines). The Augment Code × Windsurf FastContext comparison (`docs/context-search-benchmark.md`) was deleted (commit `18c5f0c`; git history still has it) — read it there before changing anything in this area.
+环境变量多在使用点直接读取，没有集中 registry；文档级清单与消费点由 `src/core/star_env_registry.rs` 的测试校验。常用变量包括 `STAR_API_KEY`、`STAR_BASE_URL`、`STAR_MODEL`、`STAR_CONTEXT_WINDOW`、`STAR_AUTO_COMPACT`、`STAR_TOOL_TIMEOUT_SECS`、`STAR_LOG_ENABLED`、`STAR_LOG_DIR`、`STAR_PROMPT_DIR`。
 
-**Retrieval is lexical, not semantic.** `SearchEngine` is a BM25-style inverted index over tree-sitter AST chunks (`chunking.rs` → `tree_sitter_chunker.rs`), with three recall paths fused by RRF (`fusion.rs`): co-occurrence-expanded lexical, exact lexical, and literal ripgrep. There is **no embedding** anywhere in the tree, so cross-language recall (Chinese question → English identifier) does not work — only Chinese→Chinese does, via CJK bigram tokenization.
+`~/.star/user-settings.json` 和 `.star/settings.json` 支持顶层 `env` block。`SettingsManager::apply_env_block` 必须在 main 早期、tokio worker 启动前调用；优先级为 project > user > shell，不能 unset，且不能覆盖 `PATH`、`HOME`、`PWD`。运行中不要 `std::env::set_var`；动态覆盖走 self-tuning 的 RwLock。
 
-Three things here were broken and are now guarded by tests:
+self-tuning 的优先级是 `override > env > default`，仅允许真正按使用点读取或每 turn 重建的 knobs。`STAR_SELFTUNING_LOCKED` 可锁定 key，`STAR_SELFTUNING_MAX_SETS`（默认 12）限制成功 set 次数；reset 不消耗额度。model 和 context window 不是 self-tunable，分别通过 `/model` 和 `/context` 修改；持久化 override 在 `~/.star/self-tuning.json`，不写入 settings。
 
-- **The search cache must be the shared singleton.** `search_cache::shared_search_cache()` is process-wide; the watcher and `CodebaseSearchTool` must point at the *same* instance. They used to be two separate objects (`ContextEngine`'s vs the tool's own `None`), so the watcher built the index in the background and the tool never saw it — every search fell back to a synchronous full rebuild (11.9s). Now: 2.3s for a new query, 3ms for a repeated one.
-- **Stopwords must not enter the index.** Without them `the`/`is`/`in` appear hundreds of times per file and `tf × idf` buries the real matches — the top hit for `permission gate` reported `an, and, docs, in, is, it…` as its matched terms.
-- **CJK needs bigram tokenization.** Chinese has no spaces, so the whole phrase used to become one token: 错误处理 → `["错误处理"]`, and searching 错误 could never reach `handle_error`.
+## i18n
 
-The auto-trigger gate (`should_trigger_codebase_search_with_flag`) deliberately checks only `enabled && !attempted && tool_present`; the *scoring* lives in `score_rank_locate_route`, which decides the query shape. Concept markers ("why", "explain") are a **score penalty, not a veto** — 「为什么 X 这么设计」 is exactly the kind of question that needs a cross-file search. On a cold index the first call returns `Warming` (empty); the agent now waits for the index and re-runs the search itself rather than hoping the model retries.
+调用点只能使用单参 `i18n::t1("key")`；文案只维护在 `i18n/en-US.json` 与 `i18n/zh-CN.json`。不要恢复旧的三参形式。词典通过 `src/core/i18n_dict.rs` 内嵌，外部覆盖顺序为 embedded → `cwd/i18n/` → `~/.starcode/i18n/` → `.star/i18n/`。缺 key 时返回 key 本身。
 
-### Prompts and tool descriptions are `.md`, not Rust
+修改文案后检查 `src/core/i18n.rs` 的四类测试：源码 key 必须存在于两份词典、词典不得有孤儿 key、两种语言 key 集合相同、换行必须是真换行而不是字面量 `\\n`。动态 key 必须登记到 `DYNAMIC_KEY_SOURCES`；插值使用词典模板的 `{name}` / `{count}` 等占位符。
 
-`src/core/prompts/system-prompts/` holds 85 markdown files embedded at compile time via `rust_embed` (`SystemPrompts`) and overridable at runtime: `STAR_PROMPT_DIR` > `~/.starcode/prompts/` > `./.star/prompts/` > embedded, with mtime-based cache invalidation (`src/core/prompts/loader.rs`). 68 are `tool-description-*.md`; per `tool_descriptions.rs`, the frontmatter `description:` becomes the schema description sent to the LLM while the file body joins the system prompt bundle. **To change what the model is told about a tool, edit the `.md`** — the registry-name → file-key mapping is a hand-maintained `HashMap` in that file.
+## Permission / confirmation
 
-### Permission / confirmation flow
+工具确认链路是：`PolicyEngine::check` → `MessageBus` → worker/`runtime/confirmation_bridge.rs` → `StreamMessage::ToolConfirmationRequest` → `AgentRequest::ConfirmTool`。
 
-A tool needing approval publishes `ToolConfirmationRequest` to `MessageBus` (`src/core/confirmation_bus/`), which consults `PolicyEngine::check` (`src/core/policy/policy_engine.rs`). Allow and Deny resolve immediately; ask-user broadcasts, the worker's `bus_rx` picks it up, `runtime/confirmation_bridge.rs` renders it into a `StreamMessage::ToolConfirmationRequest` (diff view, generic dialog, or `ask_user_question` options), and the answer returns as `AgentRequest::ConfirmTool`. `ApprovalMode` has five variants — `Default | AcceptEdits | Plan | BypassPermissions | Auto` (`src/core/policy/types.rs`, plus a parallel `types::ApprovalMode` for the UI side). The last one is named after CC's official `bypassPermissions` — the old in-repo name `yolo` survives only as an input alias in `settings_rules::approval_mode_from_str` and serde `alias`. Each mode carries a built-in allow set in `policy_engine.rs::mode_auto_allows`: `default` = read-only tools, `acceptEdits` = read-only + file edits + read-only shell commands (`types::is_readonly_fs_command`, deliberately stricter than CC's list), `plan` = read-only only but **denies** the rest, `bypassPermissions` = everything, `auto` = read-only allow + dangerous-pattern hard-deny + everything else through the LLM classifier (`core/auto_mode/`). An explicit `ask` rule beats the mode's built-in set; an explicit `deny` beats everything including `bypassPermissions`. The gate itself lives in `ToolExecutor::pass_gate` (`src/agent/tool_executor.rs`) and has exactly two outcomes — `Gate::Open` or `Gate::Closed(reason)` — with **no timeout branch**. The wait is `MessageBus::await_tool_decision`, which resolves only on a user decision, on abort, on bus close, or immediately with `NoOneToAsk` when `PolicyEngine::is_non_interactive`. Do not add a timeout back: a gate that expires invents a "the user refused" that never happened.
+`ApprovalMode` 为 `Default`、`AcceptEdits`、`Plan`、`BypassPermissions`、`Auto`。显式 `ask` rule 优先于 session/persisted grant；显式 `deny` 优先级最高，包括 bypass。`AskUser` 的默认 fallback 不等于匹配了显式 ask rule，只有 `CheckResult::explicit_rule` 能证明来源。
 
-**A grant that is written must be readable — and it must stay inside the project.** Three separate traps live in `pass_gate`:
+`ToolExecutor::pass_gate` 只有 `Gate::Open` / `Gate::Closed(reason)`，确认等待没有 timeout：`await_tool_decision` 只在用户决定、abort、bus close 或 `NoOneToAsk` 时结束。拒绝是 `Ok(confirmed == false)`，不是 error。watchdog 只能包住 `invocation.execute(...)`，不能包住用户确认等待或整个 `execute_batch`。
 
-- `requires_invocation_confirmation()` is *not* a veto. It means "consult this tool's own check every time". It once gated the permission-cache read itself (`if !approved && !requires_invocation_confirmation && …`), so for any tool that declares it — `Edit` whenever `folder_trust` is on — 「本会话允许 / 总是允许」 was recorded and never read back, and every edit re-prompted forever. A write with no read is a bug, not a policy.
-- The only thing that outranks a session/persisted grant is an **explicit `ask` rule**: the user wrote it down, so it means "ask me every time".
-- Project state must resolve to `<project>/.star`, never `~/.star`. `Storage::new` walks upwards so subdirectories inherit a monorepo root, but a project under `$HOME` used to adopt the global directory, which put 「总是允许」 in scope for every sibling project. `paths::find_nearest_project_star_dir` is the filter that prevents it.
+权限缓存必须先读再写：`requires_invocation_confirmation()` 不是阻止读取 grant 的 veto。项目 grant 必须落在最近的 `<project>/.star`，不能错误地落到 `~/.star`；使用 `paths::find_nearest_project_star_dir` / `Storage`。
 
-### Switching the model while a turn is running
+编写会回答确认提示的测试时：在 spawn 前订阅 broadcast receiver；接收循环用 `while let Ok(msg)`，再用 `if let Message::ToolConfirmationRequest(...)` 过滤，不能用会被其他消息终止的 `while let Ok(Message::ToolConfirmationRequest(...))`。
 
-A model switch requested mid-turn is **not** blocked, and it does not wait for the turn to end. That matches the three references:
+## Model switch 与 agent internals
 
-- **Claude Code** — "/model … Claude Code applies the change without waiting for the current response to finish" (since v2.1.242; before that it was feature-flagged and always queued on third-party providers).
-- **OpenCode** — "the model is sampled at the start of a provider turn. Any changes to the model selection admitted after this boundary will apply to the *next* provider turn and will not interrupt or restart the current turn."
-- **Codex** — `/model` is `available_during_task`; the change applies to the next task, and the running turn keeps the current model's policies for its pending calls.
+运行中的 `/model` 不阻塞当前 turn：新选择在下一次 provider request 生效，当前 provider request 不重启。共享 cell 在 `agent::model_switch`；`runtime/session.rs` 写入，`Agent::execute_turn` 在每次 provider request 前读取，并通过 `model_switch::resolve` 解析 provider。UI 在 acknowledgement 前显示 requested model 和 `⏳`；确认提示必须放在 always-visible status line，不能只放 processing spinner。
 
-So the change lands on the **next provider request**, not "after the whole turn" and not "never".
+`StarAgent`（`src/agent/workflows/star_agent.rs`）是 wrapper；核心状态在 `Agent`（`src/agent/agent_core.rs`），包括 tool executor、compact manager、lazy context engine、session messages、token budget 和 stall detector。主循环是 `run_agentic_loop` → `execute_turn`；工具路由、重复检测、nudge 与 compaction 位于 `src/agent/`。
 
-Mechanics: `agent::model_switch` owns the shared cell. `runtime/session.rs` publishes the user's `(model, provider)` into it when `UpdateRuntimeSettings` arrives mid-turn; `Agent::execute_turn` drains it before every provider request and resolves it against the provider store (`model_switch::resolve` — one implementation, shared with `StarAgent::set_model_with_provider`, so both paths land on the same endpoint). The long-lived agent's client and the UI acknowledgement still install at the end of the turn — the cell is what makes the *running* turn pick the new model up.
+## 其他不可忽略的事实
 
-Two UI rules that keep it from looking broken:
-- The status bar shows the **requested** model with a `⏳` marker while the worker's acknowledgement is outstanding (`status_line::status_model`). `current_model` only moves on the acknowledgement, so showing it alone reads as "切不动".
-- The y/n switch confirmation renders on its own always-visible status line. It used to live only in `current_status_line`, which is drawn by `processing_spinner_line` — and that returns nothing when `is_processing` is false, so on an idle session the prompt never appeared.
+- 不要因为模块“能编译、看起来合理”就认为已接线；先找 constructor 和 runtime bootstrap。analytics HTTP sink、Langfuse 等纸面能力尤其要先核实 live call site。
+- `PolicyEngine::load_permission_rules`、`ModelFallbackManager` 是 live path，不要重新标记为 dead code；同样不要假设 `WebBrowserTool` 存在。
+- `Cargo.lock` 已提交；修改 `Cargo.toml` 时同步更新 lockfile，CI/release 使用 `--locked`。
+- README 的目录和 binary 名称有漂移；真实布局以仓库和 Cargo 配置为准，binary 是 `starcode-cli`。
 
-### Agent internals
+## 编码约定
 
-`StarAgent` (`src/agent/workflows/star_agent.rs`, re-exported as `agent::StarAgent`) is a thin wrapper — abort flag, approval-mode lock, MCP manager, steering queue — around `Agent` (`src/agent/agent_core.rs`), which owns the machinery: `ToolExecutor`, `StreamingToolExecutor`, `CompactManager`, `ContextEngine` (lazily initialized; the constructor does no I/O), `session_messages`, token budget tracker, stall detector. The turn loop is `Agent::run_agentic_loop` → `execute_turn` (`src/agent/agent_loop.rs`), bounded by `max_session_turns` (default 200), with per-turn tool shortlisting (`src/agent/tool_routing/`), repeat-loop detection, nudges, and compression checks. Compaction is a family of strategies under `src/agent/compact/` (auto, reactive, micro, tool-output, snip); retrieval and indexing live in `src/core/context/` (tree-sitter chunking, symbol and call-graph indexes).
-
-### Config and provider resolution
-
-`ConfigParameters` (`src/core/config/config_types.rs`) is a ~90-field struct built in one shot in `main.rs`, almost all `None`. Effective model / base URL / API key come from `provider_resolution.rs`, which returns each value paired with a `SourceRef` naming its origin — precedence is session → CLI flag → `STAR_*` env → `ANTHROPIC_*` env → provider store → user settings. When a "wrong model" bug shows up, that `SourceRef` is the answer.
-
-Settings live in `~/.star/settings.json` (global) and `./.star/settings.json` (project). Build every path through `Storage` (`src/core/config/storage.rs`) rather than joining `.star` by hand. Project instructions injected into the system prompt come from the first existing of `STAR.md`, `STARCODE.md`, `CLAUDE.md` (`CONTEXT_FILE_CANDIDATES`, `src/utils/project_context.rs:11`), truncated to 8000 chars.
-
-### settings.json 的 env block（对标 Claude Code，2026-11-09 落地）
-
-`~/.star/user-settings.json` 与 `.star/settings.json` 支持顶层 `env` 对象（`{"env": {"STAR_MODEL": "…"}}`）。`SettingsManager::apply_env_block` 在 **main.rs 早期**（tokio worker 铺开之前）注入：project > user > shell 继承值，只能设置/覆盖不能 unset，`PATH` / `HOME` / `PWD` 黑名单永不被覆盖。**不要**在 agent 运行中调用它——那与散落的 `std::env::var` 竞态；运行中覆盖走 self_tuning 的 RwLock 表。
-
-### Behavior is env-var-gated to an unusual degree
-
-~360 distinct `STAR_*` variables are read across the tree, almost always inline at the point of use (`std::env::var("STAR_…").ok().and_then(…).unwrap_or(default)`), with **no central registry by design** — the architecture is deliberate (point-of-use parsing beats a maintenance-dead central file). This mirrors Claude Code's env model (官方 `env-vars` docs page is *the* registry: documented entries with per-variable precedence rows; undocumented internal flags exist and are not promised): the contract is **documented set ⊆ consumed set**, enforced by the reconciliation gate in `src/core/star_env_registry.rs` (`DOCUMENTED_STAR_ENVS` — the doc-level subset worth a promise, both tests: documented vars must really be consumed; CLAUDE.md mentions must resolve to a consume site, wildcard `STAR_X_*` entries match by prefix). When rerunning behavior diverges from what the code appears to do, grep `STAR_` in that file. Frequently relevant: `STAR_API_KEY`, `STAR_BASE_URL`, `STAR_MODEL`, `STAR_CONTEXT_WINDOW`, `STAR_AUTO_COMPACT`, `STAR_TOOL_TIMEOUT_SECS`, `STAR_LOG_ENABLED`, `STAR_LOG_DIR`, `STAR_PROMPT_DIR`. The human-readable manifest lives in `.star_env_registry.py`. `self_tuning` adds an override layer above env (see below), and resolution at a use site is `self_tuning override > env > default`.
-
-### Ten of those knobs the model can now turn itself
-
-`core/self_tuning` adds an **override layer above env** for the settings that are read at the point of use or rebuilt per turn: the 8 compaction knobs (`agent/compact/mod.rs::from_env`), `tools.max_result_chars` (`result_budget.rs`), and `tools.confirmed_call_timeout_secs` (`control_requests.rs`). Resolution is `override > env > default`, so existing `STAR_*` configuration is untouched and still wins over defaults. The model's entry point is the `self_config` tool (`inspect` / `set` / `reset`).
-
-Four constraints, all deliberate:
-
-- **Only genuinely live knobs are listed.** `knobs.rs` admits a setting only if its read site parses on use. `STAR_LLM_TIMEOUT` is baked into `reqwest::Client`'s `.timeout()` and `Config`'s `context_window` is frozen in `Config::new` — giving the model a write surface for those would make it believe it had tuned something.
-- **No `std::env::set_var`.** tokio is multi-threaded, so writing process env from a tool races other threads' `getenv`. The `RwLock` table also keeps "the user set this" distinguishable from "the model set this", which `inspect` must report.
-- **`STAR_SELFTUNING_LOCKED`** (comma-separated keys) is an operator lock; the model cannot write a locked knob. Without it the override layer's "override wins" would silently defeat a value someone deliberately pinned.
-- **`STAR_SELFTUNING_MAX_SETS`** (default 12) caps successful writes per session. `reset` never spends budget, so a model can always undo a bad change.
-
-Model and context window are still **not** self-tunable: `agent_run.rs` freezes them into the per-message fresh `Agent` at turn start, so they apply to the next user message via the existing `RuntimeSettingsMutation` path. `inspect` lists them as read-only and points at `/model` and `/context`. Persisted overrides land in `~/.star/self-tuning.json` (`Storage::self_tuning_path`), deliberately **not** `settings.json` — a within-session adjustment should not become the user's permanent configuration.
-
-### i18n：词典是唯一真相源
-
-调用点只有一种形式：**`i18n::t1("some.key")`** —— 单参。文案住在 `i18n/en-US.json` 和 `i18n/zh-CN.json`，改文案只改词典。
-
-**为什么不是 `i18n::t(key, zh, en)`。** 那个三参形式曾经存在，2026-11-12 下线。两个理由：两份字面量常常一模一样（读代码的人得逐字比对），以及更糟的 —— **它们根本不生效**。取文案是词典优先（`dict.get(key)` 命中直接返回），词典既然内嵌进二进制，调用点写的就是死代码。写两遍的代价是「改了个寂寞」：以为改了，其实改的是一行没人读的字面量。
-
-**词典已经编译进二进制。** `src/core/i18n_dict.rs` 用 `rust_embed` 内嵌 `i18n/`（和系统提示词同一个模式）。这一步不是可选的：release 产物只打包二进制 + LICENSE + README，`i18n/` 目录不在包里 —— 不内嵌的话用户机器上永远读不到词典，文案只能靠调用点字面量撑着，那正是三参形式的历史包袱。
-
-加载顺序（后者覆盖前者）：内嵌词典 → `cwd/i18n/` → `~/.starcode/i18n/` → `.star/i18n/`。外部词典让用户能覆盖翻译。
-
-**词典缺 key 时 `t1` 返回 key 本身**，不是空字符串。空串在界面上是「这一行什么都没写」，很难联想到漏了词典；返回 key 一眼看出是哪个 key 没进。
-
-四个门在 `src/core/i18n.rs` 的 `mod tests` 里，缺一个就红：
-
-- `every_key_used_in_the_source_tree_exists_in_the_dictionary` —— **窄集**判据：`T1Scanner` 单遍词法扫描 `src/` 全部 `.rs`，配平 `t1(...)` 实参括号，实参里的字面量（含三元分支）必须在两份词典里都在。实参是变量的调用点（`t1(d.key)`）必须登记进 `DYNAMIC_KEY_SOURCES`（`keymap.rs`、`palette/items.rs`、`help_popup.rs`、`palette_action.rs`），未登记直接红
-- `the_dictionary_has_no_unreferenced_entries` —— **宽集**判据：源码里出现 `"<key>"` 字面量即算引用。两个门用不同集合是刻意的：宽集把 `user.name`、`t.log.4`、`api.anthropic.com` 都当 key（缺失门误报一片），但宽集漏判孤儿的方向是安全的；缺失门必须从严
-- `the_two_dictionaries_cover_the_same_keys` —— 两份词典的 key 集合必须相同（差一个 = 那种语言下界面显示 key 本身）
-- `dictionary_values_use_real_newlines_not_escaped_sequences` —— 词典值里的换行必须是**真换行**，不能是字面量 `\n` 两字符
-
-最后一条踩过：灌词典时用 `json.dumps` 会把真换行编码成 `\n`，解析出来还是两字符，屏幕上就显示成 `# Provider Doctor\n\n`。同时注意 `t1` 的 key 不在词典时**显示 key 本身**这个兜底，恰恰是第一个门要拦的东西。扫描器本身也踩过一课：`t1(` 是 3 个字符，括号在 `idx+2`——手算偏移配平括号的那一版让**每个**调用点都解析失败，所以现在用单遍词法扫描器（`T1Scanner`），注释/字符串/字符字面量与调用点识别在同一个循环里，索引天然一致。
-
-**动态文案走模板 + 占位符。** 需要插值时，词典里存 `{0}` / `{1}` 或 `{count}` 这类占位符，调用点 `.replace("{0}", &value)`。命名占位符（`{name}`、`{count}`）优先 —— 多个插值时 `{0}` 读起来是「第几个」。
-
-### Debugging a TUI
-
-You cannot print — ratatui owns the terminal. File logging is **on by default** and writes to `.star/logs/starcode_debug.log` and `.star/logs/agent.log` via `utils::logging::{append_debug_log_line, append_agent_log_line}`; `STAR_LOG_DIR` relocates it and `STAR_LOG_ENABLED=0` disables it. Existing call sites tag lines `[Worker]`, `[AgentRuntime]`, `[INIT]`, `[UI]` — follow that.
-
-## Conventions
-
-- **Comments and doc comments in Chinese; user-visible strings in English.** `src/commands/` follows this strictly. Older code (e.g. `src/ui/app/logic.rs`) still has Chinese in user-facing strings.
-- Localized strings go through `i18n::t1(key)` (`src/core/i18n.rs`) — **单参**。文案由词典拥有，调用点只留 key。详见下方「i18n：词典是唯一真相源」。
-- Large modules open with a `///` header block covering architecture, threading, and error handling (`ui/app/runtime.rs`, `runtime/messages.rs`, `ui/services/worker.rs`). Match that when adding a module of comparable weight.
-- `src/lib.rs` and `src/main.rs` both open with a blanket `#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments)]`. The compiler will not tell you something is unused — decide by grepping for call sites.
-- rustfmt `max_width = 100`; clippy.toml sets `too-many-lines-threshold = 100`, `too-many-arguments-threshold = 10`.
-
-## Repo facts that will otherwise cost you time
-
-**Not everything is wired up.** Several subsystems compile, read plausible, and are never constructed. Verified: the analytics HTTP sink logs `"[Analytics HTTP] Would send …"` instead of sending (`core/analytics/sink.rs:133`), and the Langfuse client does the same (`core/langfuse/client.rs:315`). Before building on any subsystem, grep for its constructor and confirm something in `runtime_bootstrap` or the agent actually reaches it.
-
-**Two claims in this section were wrong until 2026-10-13 — do not reintroduce them.**
-
-- `PolicyEngine::load_permission_rules` is **live**. The real entry point is `PolicyEngine::with_project_rules` (`policy_engine.rs:60`), which calls `load_project_permissions` → `load_permission_rules` (`policy_engine.rs:91`). The only runtime construction site is `runtime_bootstrap.rs:40`, so `.star/settings.json` `permissions` **are** enforced. The old note here said it had zero callers and cited `policy_engine.rs:52` — both wrong.
-- `WebBrowserTool` **no longer exists** in the tree. Only `TOOL_WEB_BROWSER` (`constants/tools.rs:42`) survives. An earlier version of this section described it as "implements `BaseDeclarativeTool` but `new` is never called".
-
-**Counter-example worth remembering:** `ModelFallbackManager` (`src/agent/model_fallback.rs`) was long listed here as dead ("only built in `#[cfg(test)]`"). That was wrong — `agent_core.rs` constructs it and `agent_llm.rs` calls `is_fallback_eligible_error`/`try_fallback` on the live path, so `STAR_MODEL_FALLBACK_*` does take effect. Because `#![allow(dead_code)]` is on, plausibility is not evidence; only a constructor grep is.
-
-**Writing a test that answers a confirmation prompt — subscribe before you spawn, and use `if let`, not `while let`.** The message bus carries more than one message type. A responder written as `while let Ok(Message::ToolConfirmationRequest(r)) = rx.recv().await` **exits the loop** the moment any other variant arrives, and then every later `await_tool_decision(...)` has nobody to answer it and blocks forever — the wait has no timeout. The symptom is misleading: the test hangs rather than failing. Two rules, both learned the hard way: subscribe on the spawning thread (`broadcast::Receiver` only buffers messages sent *after* `subscribe()`, so subscribing inside the spawned task misses the request that is already in flight), and filter with `while let Ok(msg) = … { if let Message::ToolConfirmationRequest(r) = msg { … } }`. `agent::tool_executor::tests::allow_for_session_prevents_the_second_prompt` is the worked example, and `watch_for_confirmation` in that module is the reusable version.
-
-**A confirmation wait is not an error path — it is a promise to block.** `MessageBus::await_tool_decision` returns `Err` only for `Aborted`, `NoOneToAsk`, `BusClosed`, and `NotPublished`; a user's refusal arrives as `Ok` with `confirmed == false`. That distinction is load-bearing: "the user said no" and "the turn was interrupted" call for different next moves by the model, and a third state ("nobody answered in time") is not a thing that can happen. `ToolExecutor::with_watchdog` is the tool-run watchdog and must stay wrapped around `invocation.execute(...)` only — widening it to `execute_batch` folds the user's thinking time into the tool's budget, which is how a hung-prompt bug once disguised itself as a slow tool.
-
-**The live chat render path is `render_chat_lines` + `write_lines_to_buffer` in `ui/app/mod.rs`,** not `render_chat_history` (deleted 2026-10-13 — it was a 190-line zero-caller duplicate, and the only thing worth keeping in it, the scrollbar, had silently never drawn). Same trap for the other zero-call render modules: `interrupted.rs` was dead until the abort grace period in `ui/app/runtime.rs` started calling it, and `global_search.rs` / `theme_picker.rs` / `memory_usage.rs` / `pr_badge.rs` / `cache_pill.rs` are still unverified. Adding UI to a *new* file that nothing calls produces exactly the same bug with no test failure.
-
-**Chat-area width is one column narrower than the terminal, always** (`ui/app/mod.rs`), because the scrollbar owns the last column. Deciding the width from "is the content scrollable?" makes width and line count trigger each other and the layout flickers on the boundary.
-
-**`PolicyDecision::AskUser` has two sources; do not conflate them.** An explicit `ask` rule in `settings.json` means "ask me every time", and it must outrank a session grant. But `PolicyEngine::new`'s fallback `default_decision` is also `AskUser` (`policy_engine.rs`), which only means "no rule matched, be conservative". When the two were conflated, `tool_executor` set `policy_requires_confirmation` for both, which made its `!policy_requires_confirmation` gate permanently false — so **"Allow for session" and "Always allow" never took effect for any tool**, and every confirmation dialog claimed to match an `ask` rule that didn't exist. `CheckResult::explicit_rule` now carries the provenance; only a real matched rule sets that flag. If you add another `AskUser` return path in `PolicyEngine::check`, you must decide which side of that flag it belongs on.
-
-**Harness architecture baseline:** `docs/claude-code-alignment.md` is the single source of truth for Claude Code parity (snapshot 2026-10-13, built from official docs v2.1.2xx). The `docs/parity-*.md` files that used to carry architecture claims have been deleted; the five that remain cover UI rendering and UI framework structure only.
-
-**`tests/` dead zone — removed (2026-11-09).** Cargo compiles only the top-level `tests/*.rs` files as integration targets; the never-declared subdirectories (`agent/ common/ config/ core/ llm/ scenarios/ tools/ lsp_test_data/ snapshots/`, ~1200 lines of tests nobody ran) were deleted on 2026-11-09. What remains: the three `zz_*.rs` scratch probes. Put new tests in a `#[cfg(test)] mod tests` inside the `src/` file under test — that is where all ~2080 working tests live. `.gitignore` anchors the scratch-file patterns to the repo root (`/test_*.rs`).
-
-**The eval harness is gone (2026-10-13).** `starcode eval`, `eval/`, and `src/agent/eval_*.rs` were deleted. Two independent reasons: the mechanism layer's behavior rules validated `simulate_tool_calls_from_prompt` — which echoes the expected `tool_sequence` back as "simulated calls" — so it could not fail; and the live layer's fixture had been vendored as a gitlink without `.gitmodules`, so every fresh clone got an empty `eval/fixtures/rust-lab` and all ten live tasks silently skipped. The CI test asserted "everything is skipped", which is why the breakage went unnoticed. Consequence worth knowing: `Router::classify` and the skill heuristic now have **no** test coverage.
-
-**`/eval` was a dangling declaration — fixed (2026-10-13).** It stayed in `ALL_COMMANDS` after its handler went with the eval harness, so `/help` and `/` autocomplete listed a command that errored with `Unknown command: /eval`. The declaration is gone and `commands::system::tests::known_dangling_declarations_are_gone` records the case. Note the general trap: **a declaration with no `match` arm is silent** — `is_declared_pending()` only catches `category: "Pending"`, so any non-Pending orphan shows up in the palette and fails on use.
-
-**Orphaned directories — removed (2026-11-09).** `src/constants/` and `src/sdk/` were declared by neither `lib.rs` nor `main.rs`; editing them changed nothing. Both are deleted now (`git rm`; zero references confirmed before removal). Root `config.toml` is read by no code (its `[ui.system_prompts] dir` even points at a path that does not exist) — real configuration is `~/.star/settings.json`, `./.star/settings.json`, and env vars. The same sweep retired the never-compiled `tests/` subdirectories (`agent/ common/ config/ core/ llm/ scenarios/ tools/ lsp_test_data/ snapshots/`); only the top-level `tests/zz_*.rs` probes remain as integration targets. New lib tests still belong in `#[cfg(test)]` inside `src/`. The paper-capability subsystems (`core/bridge/`, `core/analytics/`, `core/langfuse/`) are **kept** — they are declared, compile, and are slated for real wiring; do not build on them until a runtime constructor appears (grep first).
-
-**`Cargo.lock` is committed** — it used to be gitignored despite this being a binary crate, so dependency versions re-resolved on every fresh checkout and every `--locked` build in CI/release failed. Build and release jobs now all pass `--locked`. Keep the lockfile in sync with `Cargo.toml` in the same commit when bumping dependencies.
-
-**README drift.** The README describes a nested `starcode-cli/` layout (`src/` is at the repo root) and calls the binary `starcode` (it is `starcode-cli`; `install.sh` does not rename it).
+- 注释和 doc comment 使用中文；用户可见字符串使用英文。新文案统一走 `i18n::t1(key)`。
+- 大型模块开头写 `///` header，说明架构、线程模型和错误处理。
+- `src/lib.rs`、`src/main.rs` 有宽松的 dead-code/unused allow；判断代码是否有效要 grep call site，不能只看编译器。
+- rustfmt `max_width = 100`；`clippy.toml` 的 too-many-lines threshold 为 100、too-many-arguments threshold 为 10。
