@@ -67,7 +67,7 @@ pub(crate) async fn execute_loop_command_in(
             if tasks.is_empty() {
                 ctx.state.chat_history.push(
                     crate::types::ChatEntry::assistant(
-                        "没有 /loop 任务。使用 `/loop add <name> <minutes> <prompt...>` 创建。",
+                        "No /loop tasks. Use `/loop add <name> <minutes> <prompt...>` to create one.",
                     )
                     .with_streaming(false),
                 );
@@ -75,12 +75,12 @@ pub(crate) async fn execute_loop_command_in(
             }
 
             let now = Utc::now().timestamp();
-            let mut lines = vec!["# /loop 任务\n".to_string()];
+            let mut lines = vec!["# /loop tasks\n".to_string()];
             for t in tasks {
-                let status = if t.enabled { "启用" } else { "停用" };
+                let status = if t.enabled { "enabled" } else { "disabled" };
                 let in_minutes = ((t.next_run_at - now).max(0) as f64 / 60.0).ceil() as i64;
                 lines.push(format!(
-                    "- `{}` [{}]\n  - 间隔: {} 分钟\n  - 下次运行: {}（约 {} 分钟后）\n  - 内容: {}",
+                    "- `{}` [{}]\n  - Interval: every {} minutes\n  - Next run: {} (in approximately {} minutes)\n  - Prompt: {}",
                     t.name,
                     status,
                     t.interval_minutes,
@@ -101,10 +101,10 @@ pub(crate) async fn execute_loop_command_in(
                 .map_err(|e| format!("Failed to remove loop task: {}", e))?;
 
             let msg = if removed {
-                format!("已删除 /loop 任务 `{}`。", name)
+                format!("Removed /loop task `{}`.", name)
             } else {
                 format!(
-                    "未找到 /loop 任务 `{}`。使用 `/loop list` 查看现有任务。",
+                    "Could not find /loop task `{}`. Use `/loop list` to view existing tasks.",
                     name
                 )
             };
@@ -161,7 +161,7 @@ mod tests {
     async fn an_empty_list_explains_how_to_create_one() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_in(dir.path(), LoopCommand::List).await.unwrap();
-        assert!(out.contains("没有 /loop 任务"), "{out}");
+        assert!(out.contains("No /loop tasks"), "{out}");
         assert!(
             out.contains("/loop add <name> <minutes> <prompt...>"),
             "{out}"
@@ -174,17 +174,17 @@ mod tests {
         let out = run_in(dir.path(), add("standup", 30, "summarize the diff"))
             .await
             .unwrap();
-        assert!(out.contains("已创建 /loop 任务 `standup`"), "{out}");
-        assert!(out.contains("- 间隔: 每 30 分钟"), "{out}");
-        assert!(out.contains("- 内容: summarize the diff"), "{out}");
+        assert!(out.contains("Created /loop task `standup`"), "{out}");
+        assert!(out.contains("- Interval: every 30 minutes"), "{out}");
+        assert!(out.contains("- Prompt: summarize the diff"), "{out}");
 
         assert!(crate::core::loops::loops_file_path(dir.path()).exists());
 
         let listed = run_in(dir.path(), LoopCommand::List).await.unwrap();
-        assert!(listed.starts_with("# /loop 任务"), "{listed}");
-        assert!(listed.contains("- `standup` [启用]"), "{listed}");
-        assert!(listed.contains("- 间隔: 30 分钟"), "{listed}");
-        assert!(listed.contains("- 内容: summarize the diff"), "{listed}");
+        assert!(listed.starts_with("# /loop tasks"), "{listed}");
+        assert!(listed.contains("- `standup` [enabled]"), "{listed}");
+        assert!(listed.contains("- Interval: every 30 minutes"), "{listed}");
+        assert!(listed.contains("- Prompt: summarize the diff"), "{listed}");
     }
 
     /// 间隔 0 会让 next_run_at 停在过去，调度器每轮都会重新触发 ——
@@ -225,7 +225,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(removed.contains("已删除 /loop 任务 `standup`"), "{removed}");
+        assert!(removed.contains("Removed /loop task `standup`"), "{removed}");
 
         let again = run_in(
             dir.path(),
@@ -235,7 +235,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(again.contains("未找到 /loop 任务 `standup`"), "{again}");
+        assert!(again.contains("Could not find /loop task `standup`"), "{again}");
     }
 
     #[test]
