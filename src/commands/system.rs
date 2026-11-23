@@ -201,27 +201,27 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "loop",
         alt_names: &[],
-        description: "Scheduled task management",
+        description: "Run recurring prompts on a schedule",
         category: "Automation",
         sub_commands: &[
             SlashCommand {
                 name: "add",
                 alt_names: &[],
-                description: "Create scheduled task",
+                description: "Run a prompt on a schedule",
                 category: "Automation",
                 sub_commands: &[],
             },
             SlashCommand {
                 name: "list",
                 alt_names: &[],
-                description: "List scheduled tasks",
+                description: "Show tasks and next run times",
                 category: "Automation",
                 sub_commands: &[],
             },
             SlashCommand {
                 name: "remove",
                 alt_names: &[],
-                description: "Delete scheduled task",
+                description: "Delete a task by name",
                 category: "Automation",
                 sub_commands: &[],
             },
@@ -2806,6 +2806,8 @@ pub fn command_argument_hint(input: &str) -> Option<String> {
                 "chat save" => Some("[name]"),
                 "chat delete" => Some("<session>"),
                 "chat share" => Some("[name]"),
+                "loop add" => Some("<name> <minutes> <prompt...>"),
+                "loop remove" => Some("<name>"),
                 _ => None,
             };
             let detail = if path == "resume" || path == "chat resume" {
@@ -3147,6 +3149,25 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
         }
+    }
+
+    #[test]
+    fn loop_completion_explains_arguments_and_actions() {
+        crate::core::i18n::reset_for_tests();
+
+        let hints = get_command_hints("/loop ");
+        assert_eq!(
+            hints,
+            [
+                "/loop add - Run a prompt on a schedule",
+                "/loop list - Show tasks and next run times",
+                "/loop remove - Delete a task by name",
+            ]
+        );
+        let add_hint = command_argument_hint("/loop add").unwrap();
+        assert!(add_hint.contains("<name> <minutes> <prompt...>"), "{add_hint}");
+        let remove_hint = command_argument_hint("/loop remove").unwrap();
+        assert!(remove_hint.contains("<name>"), "{remove_hint}");
     }
 
     #[test]

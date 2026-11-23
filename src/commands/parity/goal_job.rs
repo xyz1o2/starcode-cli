@@ -19,7 +19,7 @@ pub async fn goal(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
     let mut mgr = match goal_manager() {
         Ok(m) => m,
         Err(e) => {
-            push_msg(&mut ctx, format!("⚠️ {}", e));
+            push_msg(&mut ctx, e);
             return Ok(());
         }
     };
@@ -34,9 +34,9 @@ pub async fn goal(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                 Ok(id) => match mgr.update_status(&id, GoalStatus::Completed) {
                     Ok(()) => {
                         let _ = mgr.save();
-                        format!("✅ Completed `{}`.", short_id(&id))
+                        format!("Completed `{}`.", short_id(&id))
                     }
-                    Err(e) => format!("⚠️ {}", e),
+                    Err(e) => e.to_string(),
                 },
             },
         },
@@ -47,9 +47,9 @@ pub async fn goal(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
                 Ok(id) => match mgr.delete_goal(&id) {
                     Ok(()) => {
                         let _ = mgr.save();
-                        format!("🗑 Deleted `{}`.", short_id(&id))
+                        format!("Deleted `{}`.", short_id(&id))
                     }
-                    Err(e) => format!("⚠️ {}", e),
+                    Err(e) => e.to_string(),
                 },
             },
         },
@@ -59,8 +59,7 @@ pub async fn goal(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResu
             let priority = GoalPriority::Medium;
             let id = mgr.create_goal(&title, None, priority);
             format!(
-                "🎯 Goal set: **{}** (`{}`)\n\nUpdate with `/goal progress {} 50`, \
-                 finish with `/goal done {}`.",
+                "Goal set: **{}** (`{}`)\n\nUpdate with `/goal progress {} 50`; finish with `/goal done {}`.",
                 title,
                 short_id(&id),
                 short_id(&id),
@@ -87,9 +86,9 @@ pub(crate) fn goal_set_progress(
         Ok(id) => match mgr.update_progress(&id, pct.min(100)) {
             Ok(()) => {
                 let _ = mgr.save();
-                format!("📈 `{}` → {}%", short_id(&id), pct.min(100))
+                format!("`{}` is now {}% complete.", short_id(&id), pct.min(100))
             }
-            Err(e) => format!("⚠️ {}", e),
+            Err(e) => e.to_string(),
         },
     }
 }

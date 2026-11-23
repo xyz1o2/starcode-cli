@@ -1,6 +1,6 @@
 ─── 64x5 ───
   0│                                                                │
-  1│ ▶ /fixture-check  Inspect local fixture metadata               │
+  1│ > /fixture-check  Inspect local fixture metadata               │
   2│                                                                │
   3│                                                                │
   4│                                                                │

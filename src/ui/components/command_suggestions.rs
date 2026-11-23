@@ -239,7 +239,7 @@ fn render_mention_hints_overlay(
                 (Color::Reset, theme.foreground)
             };
 
-            let selection_indicator = if is_selected { "▶" } else { " " };
+            let selection_indicator = if is_selected { ">" } else { " " };
 
             let spans = vec![
                 Span::styled(
@@ -390,7 +390,7 @@ fn render_command_hints_overlay(
             };
 
             let (bg, label_fg, desc_fg, icon) = if is_selected {
-                (theme.selection_bg, theme.foreground, theme.secondary, "▶")
+                (theme.selection_bg, theme.foreground, theme.secondary, ">")
             } else {
                 (theme.background, theme.primary, theme.inactive, " ")
             };

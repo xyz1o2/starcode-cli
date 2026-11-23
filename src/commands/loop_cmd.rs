@@ -50,8 +50,8 @@ pub(crate) async fn execute_loop_command_in(
 
             let next_time = format_ts(task.next_run_at);
             let msg = format!(
-                "✅ 已创建 /loop 任务\n\n- 名称: `{}`\n- 间隔: 每 {} 分钟\n- 下次触发: {}\n- 提示词: {}",
-                task.name, task.interval_minutes, next_time, task.prompt
+                "Created /loop task `{}`.\n\n- Interval: every {} minutes\n- Next run: {}\n- Prompt: {}\n\nUse `/loop list` to view tasks or `/loop remove {}` to delete it.",
+                task.name, task.interval_minutes, next_time, task.prompt, task.name
             );
 
             ctx.state
@@ -67,7 +67,7 @@ pub(crate) async fn execute_loop_command_in(
             if tasks.is_empty() {
                 ctx.state.chat_history.push(
                     crate::types::ChatEntry::assistant(
-                        "当前没有 /loop 任务。使用 `/loop add <name> <every_minutes> <prompt...>` 创建。",
+                        "没有 /loop 任务。使用 `/loop add <name> <minutes> <prompt...>` 创建。",
                     )
                     .with_streaming(false),
                 );
@@ -75,12 +75,12 @@ pub(crate) async fn execute_loop_command_in(
             }
 
             let now = Utc::now().timestamp();
-            let mut lines = vec!["# /loop 任务列表\n".to_string()];
+            let mut lines = vec!["# /loop 任务\n".to_string()];
             for t in tasks {
-                let status = if t.enabled { "enabled" } else { "disabled" };
+                let status = if t.enabled { "启用" } else { "停用" };
                 let in_minutes = ((t.next_run_at - now).max(0) as f64 / 60.0).ceil() as i64;
                 lines.push(format!(
-                    "- `{}` [{}]\n  - every: {} min\n  - next: {} (约 {} 分钟后)\n  - prompt: {}",
+                    "- `{}` [{}]\n  - 间隔: {} 分钟\n  - 下次运行: {}（约 {} 分钟后）\n  - 内容: {}",
                     t.name,
                     status,
                     t.interval_minutes,
@@ -101,9 +101,12 @@ pub(crate) async fn execute_loop_command_in(
                 .map_err(|e| format!("Failed to remove loop task: {}", e))?;
 
             let msg = if removed {
-                format!("已删除 /loop 任务 `{}`", name)
+                format!("已删除 /loop 任务 `{}`。", name)
             } else {
-                format!("未找到 /loop 任务 `{}`", name)
+                format!(
+                    "未找到 /loop 任务 `{}`。使用 `/loop list` 查看现有任务。",
+                    name
+                )
             };
 
             ctx.state
@@ -158,9 +161,9 @@ mod tests {
     async fn an_empty_list_explains_how_to_create_one() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_in(dir.path(), LoopCommand::List).await.unwrap();
-        assert!(out.contains("当前没有 /loop 任务"), "{out}");
+        assert!(out.contains("没有 /loop 任务"), "{out}");
         assert!(
-            out.contains("/loop add <name> <every_minutes> <prompt...>"),
+            out.contains("/loop add <name> <minutes> <prompt...>"),
             "{out}"
         );
     }
@@ -171,17 +174,17 @@ mod tests {
         let out = run_in(dir.path(), add("standup", 30, "summarize the diff"))
             .await
             .unwrap();
-        assert!(out.contains("- 名称: `standup`"), "{out}");
+        assert!(out.contains("已创建 /loop 任务 `standup`"), "{out}");
         assert!(out.contains("- 间隔: 每 30 分钟"), "{out}");
-        assert!(out.contains("- 提示词: summarize the diff"), "{out}");
+        assert!(out.contains("- 内容: summarize the diff"), "{out}");
 
         assert!(crate::core::loops::loops_file_path(dir.path()).exists());
 
         let listed = run_in(dir.path(), LoopCommand::List).await.unwrap();
-        assert!(listed.starts_with("# /loop 任务列表"), "{listed}");
-        assert!(listed.contains("- `standup` [enabled]"), "{listed}");
-        assert!(listed.contains("- every: 30 min"), "{listed}");
-        assert!(listed.contains("- prompt: summarize the diff"), "{listed}");
+        assert!(listed.starts_with("# /loop 任务"), "{listed}");
+        assert!(listed.contains("- `standup` [启用]"), "{listed}");
+        assert!(listed.contains("- 间隔: 30 分钟"), "{listed}");
+        assert!(listed.contains("- 内容: summarize the diff"), "{listed}");
     }
 
     /// 间隔 0 会让 next_run_at 停在过去，调度器每轮都会重新触发 ——

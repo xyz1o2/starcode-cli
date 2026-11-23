@@ -165,7 +165,7 @@ fn render_scaffold_note(summary: &ProjectScaffoldSummary) -> Option<String> {
     }
 
     Some(format!(
-        "📁 Initialized project `.star` scaffold (created {} dirs, {} files).",
+        "Initialized project `.star` scaffold (created {} dirs, {} files).",
         summary.created_dirs.len(),
         summary.created_files.len()
     ))
@@ -185,14 +185,11 @@ pub async fn run(ctx: CommandContext<'_>, _args: Vec<String>) -> CommandResult {
 
     let mut content = if target_exists {
         format!(
-            "🔍 Analyzing codebase to improve existing {}...",
+            "Analyzing codebase to improve existing {}...",
             target_path.display()
         )
     } else {
-        format!(
-            "🔍 Analyzing codebase to create {}...",
-            target_path.display()
-        )
+        format!("Analyzing codebase to create {}...", target_path.display())
     };
     if let Some(note) = &scaffold_note {
         content.push_str(&format!("\n\n{}", note));
