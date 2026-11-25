@@ -225,7 +225,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(removed.contains("Removed /loop task `standup`"), "{removed}");
+        assert!(
+            removed.contains("Removed /loop task `standup`"),
+            "{removed}"
+        );
 
         let again = run_in(
             dir.path(),
@@ -235,7 +238,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(again.contains("Could not find /loop task `standup`"), "{again}");
+        assert!(
+            again.contains("Could not find /loop task `standup`"),
+            "{again}"
+        );
     }
 
     #[test]

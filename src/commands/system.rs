@@ -3165,7 +3165,10 @@ mod tests {
             ]
         );
         let add_hint = command_argument_hint("/loop add").unwrap();
-        assert!(add_hint.contains("<name> <minutes> <prompt...>"), "{add_hint}");
+        assert!(
+            add_hint.contains("<name> <minutes> <prompt...>"),
+            "{add_hint}"
+        );
         let remove_hint = command_argument_hint("/loop remove").unwrap();
         assert!(remove_hint.contains("<name>"), "{remove_hint}");
     }

@@ -29,7 +29,7 @@ pub struct GlobalSearchState {
     pub search_error: Option<String>,
     /// 当前生效搜索的全局唯一标识；关闭或替换弹窗会使旧请求失效。
     pub active_request_id: Option<u64>,
-    /// 当前 ripgrep 子进程的取消令牌，归 UI 状态所有。
+    /// 当前 `rg` 子进程的取消令牌，归 UI 状态所有。
     cancel_token: Option<CancellationToken>,
     /// 结果是否被截断（达到 MAX_TOTAL_MATCHES）
     pub truncated: bool,
@@ -73,7 +73,7 @@ impl GlobalSearchState {
         token
     }
 
-    /// 使当前请求失效，并让正在运行的 ripgrep 子进程及时退出。
+    /// 使当前请求失效，并让正在运行的 `rg` 子进程及时退出。
     pub fn cancel_active_request(&mut self) {
         if let Some(token) = self.cancel_token.take() {
             token.cancel();
@@ -120,8 +120,10 @@ impl GlobalSearchState {
 
 /// Execute a cancellable ripgrep search, returning `None` when superseded.
 ///
-/// 对标 Claude Code GlobalSearchDialog:
-/// - `-n --no-heading -i -m {MAX_MATCHES_PER_FILE} -F -e query`
+/// 对标 Claude Code GlobalSearchDialog：
+/// - `--json --line-number --ignore-case --max-count {MAX_MATCHES_PER_FILE} --fixed-strings`
+/// - 搜索整个工作区，包含尚未被 Git 跟踪的新文件
+/// - `rg` 不可用时使用内嵌后端，不让搜索功能静默失效
 /// - 结果去重（key = "file:line"）
 /// - 达到 MAX_TOTAL_MATCHES 时截断
 pub async fn execute_search(
@@ -137,23 +139,23 @@ pub async fn execute_search(
     let mut command = tokio::process::Command::new("rg");
     command
         .args([
-            "--line-number",
-            "--no-heading",
-            "-i",
-            "-m",
+            "--json",
+            "--ignore-case",
+            "--max-count",
             &max_per_file,
-            "-F",
+            "--fixed-strings",
             "-e",
             query,
+            ".",
         ])
-        .arg(cwd)
+        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => return Some((Vec::new(), false)),
+        Err(_) => return execute_native_search(query, cwd, cancellation).await,
     };
     let stdout = child.stdout.take();
     let stdout_task = tokio::spawn(async move {
@@ -164,28 +166,92 @@ pub async fn execute_search(
         bytes
     });
 
-    tokio::select! {
-        result = child.wait() => {
-            if result.is_err() {
+    let status = tokio::select! {
+        result = child.wait() => match result {
+            Ok(status) => status,
+            Err(_) => {
                 let _ = stdout_task.await;
-                return Some((Vec::new(), false));
+                return execute_native_search(query, cwd, cancellation).await;
             }
-        }
+        },
         _ = cancellation.cancelled() => {
             let _ = child.kill().await;
             let _ = child.wait().await;
             let _ = stdout_task.await;
             return None;
         }
-    }
+    };
 
     let stdout = stdout_task.await.unwrap_or_default();
     if cancellation.is_cancelled() {
         return None;
     }
+    // Exit code 1 means "no matches"; other failures use the built-in backend.
+    if status.code() != Some(0) && status.code() != Some(1) {
+        return execute_native_search(query, cwd, cancellation).await;
+    }
     let stdout = String::from_utf8_lossy(&stdout);
-    let results = parse_rg_output(stdout.trim(), MAX_TOTAL_MATCHES);
+    let results = parse_rg_json_output(&stdout, MAX_TOTAL_MATCHES);
     let truncated = results.len() >= MAX_TOTAL_MATCHES;
+    Some((results, truncated))
+}
+
+/// 在 `rg` 不可用或子进程失败时，使用内嵌的 Rust grep 后端。
+///
+/// 这不是调用外部二进制，因此不会因为用户没有安装 ripgrep 而失效。
+async fn execute_native_search(
+    query: &str,
+    cwd: &Path,
+    cancellation: &CancellationToken,
+) -> Option<(Vec<SearchResult>, bool)> {
+    let query = query.to_string();
+    let cwd = cwd.to_path_buf();
+    let search_cwd = cwd.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let config = crate::core::tools::ripgrep::RipgrepConfig {
+            case_sensitive: false,
+            whole_word: false,
+            regex: false,
+            max_results: Some(MAX_TOTAL_MATCHES as u32),
+            file_types: None,
+            exclude_patterns: None,
+            include_patterns: None,
+            include_base: None,
+            include_hidden: true,
+            max_file_size: Some(2 * 1024 * 1024),
+        };
+        crate::core::tools::ripgrep::search_with_ripgrep_stats(
+            &query,
+            &search_cwd.to_string_lossy(),
+            config,
+        )
+        .map(|(matches, stats)| (matches, stats.hit_limit))
+        .map_err(|error| error.to_string())
+    })
+    .await;
+
+    if cancellation.is_cancelled() {
+        return None;
+    }
+
+    let (matches, truncated) = result.ok()?.ok()?;
+    let results = matches
+        .into_iter()
+        .filter_map(|matched| {
+            let file = Path::new(&matched.file)
+                .strip_prefix(&cwd)
+                .unwrap_or(Path::new(&matched.file))
+                .to_string_lossy()
+                .trim_start_matches(std::path::MAIN_SEPARATOR)
+                .to_string();
+            Some(SearchResult {
+                file,
+                line_number: matched.line.unwrap_or_default() as usize,
+                content: matched.text.unwrap_or_default(),
+                score: 0,
+            })
+        })
+        .collect();
     Some((results, truncated))
 }
 
@@ -226,25 +292,54 @@ pub fn truncate_path_middle(path: &str, max_width: usize) -> String {
     format!("{}...{}", &dir_part[..dir_budget], file_name)
 }
 
-/// Parse ripgrep output into SearchResult entries
-fn parse_rg_output(output: &str, max_results: usize) -> Vec<SearchResult> {
+/// Parse `rg --json` output into search results.
+///
+/// 使用 JSON 而不是 `file:line:text`，避免 Windows 盘符和合法的冒号文件名
+/// 被误当成字段分隔符。`rg` 的其它事件（begin/end/summary）会被忽略。
+fn parse_rg_json_output(output: &str, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    for line in output.lines().take(max_results) {
-        // Format: file:line:content
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() >= 3 {
-            let file = parts[0].to_string();
-            let line_number = parts[1].parse().unwrap_or(0);
-            let content = parts[2].to_string();
-
-            results.push(SearchResult {
-                file,
-                line_number,
-                content,
-                score: 0,
-            });
+    for line in output.lines() {
+        if results.len() >= max_results {
+            break;
         }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+            continue;
+        }
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        let Some(file) = data
+            .get("path")
+            .and_then(|path| path.get("text"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(line_number) = data
+            .get("line_number")
+            .and_then(serde_json::Value::as_u64)
+            .map(|line| line as usize)
+        else {
+            continue;
+        };
+        let content = data
+            .get("lines")
+            .and_then(|lines| lines.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+
+        results.push(SearchResult {
+            file: file.to_string(),
+            line_number,
+            content,
+            score: 0,
+        });
     }
 
     results
@@ -309,6 +404,25 @@ mod tests {
         assert_eq!(results[1].content, "first");
     }
 
+    #[test]
+    fn json_parser_preserves_colons_in_paths() {
+        let output = serde_json::json!({
+            "type": "match",
+            "data": {
+                "path": {"text": "src/a:b.rs"},
+                "lines": {"text": "fn needle() {}\n"},
+                "line_number": 7
+            }
+        })
+        .to_string();
+
+        let results = parse_rg_json_output(&output, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file, "src/a:b.rs");
+        assert_eq!(results[0].line_number, 7);
+        assert_eq!(results[0].content, "fn needle() {}");
+    }
+
     #[tokio::test]
     async fn pre_cancelled_search_returns_no_result() {
         let token = CancellationToken::new();
@@ -316,6 +430,24 @@ mod tests {
         assert!(execute_search("needle", Path::new("."), &token)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn non_git_directory_uses_the_embedded_search_backend() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        std::fs::write(
+            directory.path().join("note.txt"),
+            "native fallback needle\n",
+        )
+        .expect("write search fixture");
+        let token = CancellationToken::new();
+
+        let (results, _) = execute_search("needle", directory.path(), &token)
+            .await
+            .expect("search should complete");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file, "note.txt");
+        assert_eq!(results[0].line_number, 1);
     }
 }
 

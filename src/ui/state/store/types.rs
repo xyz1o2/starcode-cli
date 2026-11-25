@@ -233,7 +233,7 @@ pub enum QuickMenuKind {
 
 /// 对话内搜索状态（对标 Claude Code 的 Ctrl+F）。
 ///
-/// 与 `GlobalSearchState`（ripgrep 搜文件）**不是一回事**：那个搜仓库里的文件，
+/// 与 `GlobalSearchState`（ripgrep 搜文件）**不是一回事**：那个搜工作区里的文件，
 /// 这个搜已经发生过的对话 —— 长会话里"刚才那条命令是什么"只能靠它。
 ///
 /// 命中位置用**渲染行号**记录（`rendered_cache` 按 entry 下标展开后的行下标），

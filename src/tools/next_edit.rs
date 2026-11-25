@@ -137,9 +137,45 @@ impl BaseDeclarativeTool for NextEditTool {
         }))
     }
 
-    // 纯分析：rg 找引用 + 读文件，不改任何磁盘状态。
+    // 纯分析：ripgrep/内嵌搜索找引用 + 读文件，不改任何磁盘状态。
     fn is_read_only(&self) -> bool {
         true
+    }
+}
+
+/// 解析 `rg --json` 的 match 事件，避免用冒号拆分路径。
+fn parse_rg_matches(output: &[u8]) -> Vec<(String, u64)> {
+    let text = String::from_utf8_lossy(output);
+    text.lines()
+        .filter_map(|line| {
+            let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+                return None;
+            }
+            let data = event.get("data")?;
+            let path = data
+                .get("path")
+                .and_then(|path| path.get("text"))
+                .and_then(serde_json::Value::as_str)?;
+            let line_number = data
+                .get("line_number")
+                .and_then(serde_json::Value::as_u64)?;
+            Some((path.to_string(), line_number))
+        })
+        .collect()
+}
+
+fn normalize_search_path(path: &str) -> String {
+    path.strip_prefix("./").unwrap_or(path).to_string()
+}
+
+fn ripgrep_install_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Install with `brew install ripgrep`"
+    } else if cfg!(target_os = "windows") {
+        "Install with `winget install BurntSushi.ripgrep.MSVC` or `choco install ripgrep`"
+    } else {
+        "Install with `sudo apt install ripgrep` (Debian/Ubuntu), `sudo dnf install ripgrep` (Fedora), or `sudo pacman -S ripgrep` (Arch)"
     }
 }
 
@@ -148,49 +184,103 @@ async fn analyze_impact(
     symbol_name: &str,
     base_dir: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // 1. First, use ripgrep for fast text search to find potential usages
-    // This is much faster than parsing every file
-    let output = Command::new("rg")
-        .arg("--json")
-        .arg(symbol_name)
-        .arg(".")
+    // 1. Prefer ripgrep for fast workspace search. Unlike `git grep`, it also
+    // searches files that have not been staged or tracked yet.
+    let rg_output = Command::new("rg")
+        .args(["--json", "--fixed-strings", "-e", symbol_name, "."])
         .current_dir(base_dir)
         .output()
-        .await?;
-
-    if !output.status.success() {
-        // If rg fails (e.g. no matches), return empty result
-        return Ok(format!("No references found for '{}'.", symbol_name));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        .await;
 
     let mut usages: HashMap<String, Vec<u64>> = HashMap::new();
     let mut files_to_parse: HashSet<String> = HashSet::new();
-
-    for line in stdout.lines() {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-            if json["type"] == "match" {
-                if let Some(data) = json.get("data") {
-                    if let Some(path) = data
-                        .get("path")
-                        .and_then(|p| p.get("text"))
-                        .and_then(|t| t.as_str())
-                    {
-                        if let Some(line_num) = data.get("line_number").and_then(|l| l.as_u64()) {
-                            usages.entry(path.to_string()).or_default().push(line_num);
-                            if path.ends_with(".rs") {
-                                files_to_parse.insert(path.to_string());
-                            }
-                        }
-                    }
+    let mut fallback_notice = None;
+    let use_native_fallback = match rg_output {
+        Ok(output) if output.status.success() => {
+            for (path, line_num) in parse_rg_matches(&output.stdout) {
+                let path = normalize_search_path(&path);
+                usages.entry(path.clone()).or_default().push(line_num);
+                if path.ends_with(".rs") {
+                    files_to_parse.insert(path);
                 }
+            }
+            false
+        }
+        // `rg` uses exit code 1 for a valid search with no matches. This is a
+        // real empty result, not a missing executable, so do not run fallback.
+        Ok(output) if output.status.code() == Some(1) => false,
+        Ok(output) => {
+            fallback_notice = Some(format!(
+                "ripgrep (`rg`) could not complete the search ({}); I used StarCode's built-in search fallback.",
+                output.status
+            ));
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fallback_notice = Some(
+                format!(
+                    "ripgrep (`rg`) is not installed. I used StarCode's built-in search fallback. Would you like to install ripgrep? {}. Do not install software without confirmation.",
+                    ripgrep_install_hint()
+                ),
+            );
+            true
+        }
+        Err(error) => {
+            fallback_notice = Some(format!(
+                "ripgrep (`rg`) could not be started ({}); I used StarCode's built-in search fallback.",
+                error
+            ));
+            true
+        }
+    };
+
+    if use_native_fallback {
+        let fallback_root = base_dir.to_path_buf();
+        let fallback_symbol = symbol_name.to_string();
+        let native = tokio::task::spawn_blocking(move || {
+            let config = crate::core::tools::ripgrep::RipgrepConfig {
+                case_sensitive: true,
+                whole_word: false,
+                regex: false,
+                max_results: Some(10_000),
+                file_types: None,
+                exclude_patterns: None,
+                include_patterns: None,
+                include_base: None,
+                include_hidden: true,
+                max_file_size: Some(2 * 1024 * 1024),
+            };
+            crate::core::tools::ripgrep::search_with_ripgrep_stats(
+                &fallback_symbol,
+                &fallback_root.to_string_lossy(),
+                config,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .map_err(std::io::Error::other)?;
+
+        for matched in native.0 {
+            let path = Path::new(&matched.file)
+                .strip_prefix(base_dir)
+                .unwrap_or(Path::new(&matched.file))
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let line_num = matched.line.unwrap_or_default() as u64;
+            usages.entry(path.clone()).or_default().push(line_num);
+            if path.ends_with(".rs") {
+                files_to_parse.insert(path);
             }
         }
     }
 
     // 2. Report generation
     let mut report = String::new();
+    if let Some(notice) = fallback_notice {
+        report.push_str(&notice);
+        report.push_str("\n\n");
+    }
     report.push_str(&format!(
         "Impact Analysis for '{}' (defined in {}):\n\n",
         symbol_name, file_path
@@ -232,6 +322,23 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn rg_json_parser_preserves_colons_in_paths() {
+        let output = json!({
+            "type": "match",
+            "data": {
+                "path": {"text": "src/a:b.rs"},
+                "line_number": 9
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            parse_rg_matches(output.as_bytes()),
+            vec![("src/a:b.rs".to_string(), 9)]
+        );
+    }
 
     #[tokio::test]
     async fn impact_search_and_snippets_use_the_bound_base_dir() {
