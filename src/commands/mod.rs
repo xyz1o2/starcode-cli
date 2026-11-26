@@ -195,6 +195,7 @@ pub async fn handle_command(
         "copy" => utility::copy(ctx, args).await,
         "undo" => utility::undo(ctx, args).await,
         "compress" => utility::compress(ctx, args).await,
+        // /init 的帮助、预览、离线参数及补充要求由 topic module 统一校验。
         "init" => init::run(ctx, args).await,
         "plan" => plan::run(ctx, args).await,
         "loop" => loop_wrapper(ctx, args).await,

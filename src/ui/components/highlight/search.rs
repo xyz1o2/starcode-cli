@@ -275,21 +275,44 @@ pub fn merge_results(existing: &mut Vec<SearchResult>, new_results: Vec<SearchRe
 /// 当路径过长时，保留目录开头和文件名，中间用 `...` 连接。
 /// 例如: `/very/long/path/to/file.rs` → `/very/.../file.rs`
 pub fn truncate_path_middle(path: &str, max_width: usize) -> String {
-    if path.len() <= max_width || max_width < 5 {
+    use crate::ui::utils::render::{char_display_width, display_width};
+
+    if display_width(path) <= max_width {
         return path.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
     }
     // 找到最后一个 / 分隔目录和文件名
     let last_sep = path.rfind('/').unwrap_or(0);
-    let file_name = &path[last_sep..];
-    let dir_part = &path[..last_sep];
-    // 如果文件名本身就够长，截断文件名
-    if file_name.len() >= max_width.saturating_sub(3) {
-        let start = file_name.len().saturating_sub(max_width.saturating_sub(3));
+    let (dir_part, file_name) = path.split_at(last_sep);
+    let budget = max_width - 3;
+    let file_width = display_width(file_name);
+    // 按终端列宽预算选择字符边界，不能把字节偏移当成字符偏移。
+    if file_width >= budget {
+        let mut start = file_name.len();
+        let mut width = 0;
+        for (index, ch) in file_name.char_indices().rev() {
+            width += char_display_width(ch);
+            if width > budget {
+                break;
+            }
+            start = index;
+        }
         return format!("...{}", &file_name[start..]);
     }
     // 保留目录开头 + ... + 文件名
-    let dir_budget = max_width.saturating_sub(file_name.len()).saturating_sub(3);
-    format!("{}...{}", &dir_part[..dir_budget], file_name)
+    let dir_budget = budget - file_width;
+    let mut end = 0;
+    let mut width = 0;
+    for (index, ch) in dir_part.char_indices() {
+        width += char_display_width(ch);
+        if width > dir_budget {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    format!("{}...{}", &dir_part[..end], file_name)
 }
 
 /// Parse `rg --json` output into search results.
@@ -423,6 +446,54 @@ mod tests {
         assert_eq!(results[0].content, "fn needle() {}");
     }
 
+    #[test]
+    fn path_truncation_uses_character_boundaries_and_display_width() {
+        use crate::ui::utils::render::display_width;
+
+        assert_eq!(
+            truncate_path_middle("/🙂🙂🙂/file.rs", 14),
+            "/🙂.../file.rs"
+        );
+        assert_eq!(truncate_path_middle("🙂🙂🙂.rs", 8), "...🙂.rs");
+        assert_eq!(truncate_path_middle("src/🙂.rs", 10), "src/🙂.rs");
+        assert_eq!(
+            truncate_path_middle("/alpha/beta/file.rs", 18),
+            "/alpha/.../file.rs"
+        );
+
+        for path in ["/🙂🙂🙂/文件.rs", "🙂🙂🙂.rs", "src/short.rs", ""] {
+            for width in 0..=24 {
+                let truncated = truncate_path_middle(path, width);
+                assert!(display_width(&truncated) <= width);
+            }
+        }
+    }
+
+    #[test]
+    fn query_highlights_preserve_unicode_text_and_original_offsets() {
+        for (text, query, expected_matches) in [
+            ("K🙂Needle", "needle", vec!["Needle"]),
+            ("🙂KK🙂", "k", vec!["K", "K"]),
+            ("🙂K🙂", "K", vec!["K"]),
+            ("İ🙂needle", "needle", vec!["needle"]),
+            ("🙂 a.b axb A.B 🙂", "a.b", vec!["a.b", "A.B"]),
+            ("🙂🙂🙂", "🙂🙂", vec!["🙂🙂"]),
+            ("🙂 text", "", vec![]),
+            ("🙂 text", "absent", vec![]),
+            ("", "needle", vec![]),
+        ] {
+            let spans = highlight_query_matches(text, query);
+            let restored: String = spans.iter().map(|span| span.content.as_ref()).collect();
+            assert_eq!(restored, text);
+            let highlighted: Vec<&str> = spans
+                .iter()
+                .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(highlighted, expected_matches);
+        }
+    }
+
     #[tokio::test]
     async fn pre_cancelled_search_returns_no_result() {
         let token = CancellationToken::new();
@@ -459,27 +530,28 @@ pub fn highlight_query_matches(text: &str, query: &str) -> Vec<Span<'static>> {
         return vec![Span::raw(text.to_string())];
     }
 
-    let query_lower = query.to_lowercase();
-    let text_lower = text.to_lowercase();
+    // 与搜索后端一样做字面量、大小写不敏感匹配；偏移始终来自原文，
+    // 避免 Unicode 大小写转换改变字节长度后切进字符内部。
+    let Ok(pattern) = regex::RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()
+    else {
+        return vec![Span::raw(text.to_string())];
+    };
     let mut spans = Vec::new();
     let mut last_end = 0;
 
-    // 查找所有匹配位置
-    let mut search_start = 0;
-    while let Some(pos) = text_lower[search_start..].find(&query_lower) {
-        let abs_pos = search_start + pos;
+    for matched in pattern.find_iter(text) {
         // 匹配前的普通文本
-        if abs_pos > last_end {
-            spans.push(Span::raw(text[last_end..abs_pos].to_string()));
+        if matched.start() > last_end {
+            spans.push(Span::raw(text[last_end..matched.start()].to_string()));
         }
         // 匹配部分 — inverse video 高亮
-        let match_end = abs_pos + query.len();
         spans.push(Span::styled(
-            text[abs_pos..match_end].to_string(),
+            matched.as_str().to_string(),
             Style::default().add_modifier(Modifier::REVERSED),
         ));
-        last_end = match_end;
-        search_start = match_end;
+        last_end = matched.end();
     }
     // 剩余普通文本
     if last_end < text.len() {

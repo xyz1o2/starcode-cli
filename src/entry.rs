@@ -24,7 +24,8 @@ enum Commands {
         #[command(subcommand)]
         command: crate::commands::git::GitCommand,
     },
-    /// Initialize a new project with STAR.md
+    /// 离线创建最小 AGENTS.md；完整项目分析使用交互式 /init。
+    #[command(about = "Create minimal AGENTS.md guidance without AI analysis")]
     Init,
     /// Diagnose environment: config files, provider credentials, toolchain, logs
     ///
@@ -195,19 +196,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Commands::Init) => {
-            let cwd = std::env::current_dir()?;
+            let cwd = std::env::current_dir()?.join(&args.directory);
+            let (_, context_exists) = crate::commands::init::resolve_context_target(&cwd);
             match crate::commands::init::generate_initial_context(&cwd) {
                 Ok(path) => {
-                    println!("✅ Successfully created context file at {}", path.display());
-                    println!("💡 Tip: Run `starcode` and use `/init` for a full AI analysis.");
+                    println!(
+                        "{}",
+                        crate::core::i18n::t1("cmd.init.created")
+                            .replace("{path}", &path.display().to_string())
+                    );
                 }
                 Err(e) => {
-                    eprintln!("❌ {}", e);
-                    if e.contains("already exists") {
-                        println!(
-                            "💡 Tip: Run `starcode` and use `/init` to improve the existing file."
-                        );
-                    } else {
+                    eprintln!("{e}");
+                    // 不通过本地化错误文案判断错误类型。
+                    if !context_exists {
                         std::process::exit(1);
                     }
                 }
