@@ -57,6 +57,8 @@ pub struct ChatState {
     pub complete_task_message_ids: HashSet<u64>,
     pub auto_continued_message_ids: HashSet<u64>,
     pub pending_user_messages: VecDeque<crate::types::UserInput>,
+    /// 普通 `/loop` 的到期快照；独立于用户 steering，空闲时非阻塞派发。
+    pub(crate) pending_loop_tasks: crate::runtime::background::LoopTaskQueue,
     pub input_intent: crate::types::InputIntent,
     pub(crate) stashed_prompt: Option<StashedPrompt>,
     pub command_history_path: Option<std::path::PathBuf>,
@@ -874,6 +876,7 @@ impl ChatState {
             complete_task_message_ids: HashSet::new(),
             auto_continued_message_ids: HashSet::new(),
             pending_user_messages: VecDeque::new(),
+            pending_loop_tasks: Default::default(),
             input_intent: crate::types::InputIntent::CommandEligible,
             stashed_prompt: None,
             command_history_path: crate::core::config::history_store::history_file(),

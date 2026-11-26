@@ -115,20 +115,25 @@ impl GoalManager {
         self.persistence.save(&goals)
     }
 
-    /// 创建新目标
-    pub fn create_goal(
+    /// 先保存候选状态，成功后才替换内存；失败不会残留半次更新。
+    fn commit<T>(
         &mut self,
-        title: &str,
-        description: Option<&str>,
-        priority: GoalPriority,
-    ) -> String {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().timestamp();
+        mutate: impl FnOnce(&mut HashMap<String, Goal>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut goals = self.goals.clone();
+        let result = mutate(&mut goals)?;
+        self.persistence.save(&goals.values().collect::<Vec<_>>())?;
+        self.goals = goals;
+        Ok(result)
+    }
 
-        let goal = Goal {
-            id: id.clone(),
+    /// 创建尚未持久化的目标，供普通创建与子目标事务共用。
+    fn new_goal(title: &str, description: Option<&str>, priority: GoalPriority) -> Goal {
+        let now = chrono::Utc::now().timestamp();
+        Goal {
+            id: uuid::Uuid::new_v4().to_string(),
             title: title.to_string(),
-            description: description.map(|s| s.to_string()),
+            description: description.map(str::to_string),
             status: GoalStatus::InProgress,
             priority,
             created_at: now,
@@ -140,11 +145,22 @@ impl GoalManager {
             parent_id: None,
             deadline: None,
             milestones: Vec::new(),
-        };
+        }
+    }
 
-        self.goals.insert(id.clone(), goal);
-        let _ = self.save();
-        id
+    /// 创建新目标
+    pub fn create_goal(
+        &mut self,
+        title: &str,
+        description: Option<&str>,
+        priority: GoalPriority,
+    ) -> Result<String, String> {
+        let goal = Self::new_goal(title, description, priority);
+        self.commit(|goals| {
+            let id = goal.id.clone();
+            goals.insert(id.clone(), goal);
+            Ok(id)
+        })
     }
 
     /// 创建子目标
@@ -154,93 +170,102 @@ impl GoalManager {
         title: &str,
         description: Option<&str>,
     ) -> Result<String, String> {
-        if !self.goals.contains_key(parent_id) {
-            return Err(format!("Parent goal not found: {}", parent_id));
-        }
-
-        let id = self.create_goal(title, description, GoalPriority::Medium);
-
-        if let Some(goal) = self.goals.get_mut(&id) {
+        self.commit(|goals| {
+            let parent = goals
+                .get_mut(parent_id)
+                .ok_or_else(|| format!("Parent goal not found: {}", parent_id))?;
+            let mut goal = Self::new_goal(title, description, GoalPriority::Medium);
             goal.parent_id = Some(parent_id.to_string());
-        }
-
-        if let Some(parent) = self.goals.get_mut(parent_id) {
+            let id = goal.id.clone();
             parent.sub_goals.push(id.clone());
-        }
-
-        let _ = self.save();
-        Ok(id)
+            parent.updated_at = goal.created_at;
+            goals.insert(id.clone(), goal);
+            Ok(id)
+        })
     }
 
     /// 更新目标状态
     pub fn update_status(&mut self, goal_id: &str, status: GoalStatus) -> Result<(), String> {
-        if let Some(goal) = self.goals.get_mut(goal_id) {
-            goal.status = status.clone();
+        self.commit(|goals| {
+            let goal = goals
+                .get_mut(goal_id)
+                .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
+            let was_completed = goal.status == GoalStatus::Completed;
+            goal.status = status;
             goal.updated_at = chrono::Utc::now().timestamp();
-
-            if status == GoalStatus::Completed {
-                goal.completed_at = Some(chrono::Utc::now().timestamp());
+            if goal.status == GoalStatus::Completed {
+                goal.completed_at = Some(goal.updated_at);
                 goal.progress = 100;
+            } else {
+                goal.completed_at = None;
+                if was_completed {
+                    goal.progress = 0;
+                }
             }
-
-            let _ = self.save();
             Ok(())
-        } else {
-            Err(format!("Goal not found: {}", goal_id))
-        }
+        })
     }
 
     /// 更新目标进度
     pub fn update_progress(&mut self, goal_id: &str, progress: u8) -> Result<(), String> {
-        if let Some(goal) = self.goals.get_mut(goal_id) {
-            goal.progress = progress.min(100);
-            goal.updated_at = chrono::Utc::now().timestamp();
-
-            if progress >= 100 {
-                goal.status = GoalStatus::Completed;
-                goal.completed_at = Some(chrono::Utc::now().timestamp());
-            }
-
-            let _ = self.save();
-            Ok(())
-        } else {
-            Err(format!("Goal not found: {}", goal_id))
+        if progress > 100 {
+            return Err(crate::core::i18n::t1("cmd.goal.invalid_progress")
+                .replace("{value}", &progress.to_string()));
         }
+        self.commit(|goals| {
+            let goal = goals
+                .get_mut(goal_id)
+                .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
+            goal.progress = progress;
+            goal.updated_at = chrono::Utc::now().timestamp();
+            if progress == 100 {
+                goal.status = GoalStatus::Completed;
+                goal.completed_at = Some(goal.updated_at);
+            } else {
+                if goal.status == GoalStatus::Completed {
+                    goal.status = GoalStatus::InProgress;
+                }
+                goal.completed_at = None;
+            }
+            Ok(())
+        })
     }
 
     /// 添加里程碑
     pub fn add_milestone(&mut self, goal_id: &str, title: &str) -> Result<String, String> {
-        if let Some(goal) = self.goals.get_mut(goal_id) {
+        self.commit(|goals| {
+            let goal = goals
+                .get_mut(goal_id)
+                .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
             let milestone_id = uuid::Uuid::new_v4().to_string();
-            let milestone = Milestone {
+            goal.milestones.push(Milestone {
                 id: milestone_id.clone(),
                 title: title.to_string(),
                 completed: false,
                 completed_at: None,
-            };
-            goal.milestones.push(milestone);
+            });
             goal.updated_at = chrono::Utc::now().timestamp();
-
-            let _ = self.save();
             Ok(milestone_id)
-        } else {
-            Err(format!("Goal not found: {}", goal_id))
-        }
+        })
     }
 
     /// 完成里程碑
     pub fn complete_milestone(&mut self, goal_id: &str, milestone_id: &str) -> Result<(), String> {
-        if let Some(goal) = self.goals.get_mut(goal_id) {
-            if let Some(milestone) = goal.milestones.iter_mut().find(|m| m.id == milestone_id) {
-                milestone.completed = true;
-                milestone.completed_at = Some(chrono::Utc::now().timestamp());
-                goal.updated_at = chrono::Utc::now().timestamp();
-
-                let _ = self.save();
-                return Ok(());
-            }
-        }
-        Err(format!("Goal or milestone not found"))
+        self.commit(|goals| {
+            let goal = goals
+                .get_mut(goal_id)
+                .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
+            let milestone = goal
+                .milestones
+                .iter_mut()
+                .find(|m| m.id == milestone_id)
+                .ok_or_else(|| format!("Milestone not found: {}", milestone_id))?;
+            let now = chrono::Utc::now().timestamp();
+            milestone.completed = true;
+            milestone.completed_at = Some(now);
+            goal.updated_at = now;
+            Ok(())
+        })
     }
 
     /// 获取目标
@@ -271,12 +296,12 @@ impl GoalManager {
 
     /// 删除目标
     pub fn delete_goal(&mut self, goal_id: &str) -> Result<(), String> {
-        if self.goals.remove(goal_id).is_some() {
-            let _ = self.save();
+        self.commit(|goals| {
+            goals
+                .remove(goal_id)
+                .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
             Ok(())
-        } else {
-            Err(format!("Goal not found: {}", goal_id))
-        }
+        })
     }
 
     /// 生成目标提示词
@@ -287,5 +312,132 @@ impl GoalManager {
             .ok_or_else(|| format!("Goal not found: {}", goal_id))?;
 
         Ok(self.prompts.generate_goal_prompt(goal))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager(dir: &std::path::Path) -> GoalManager {
+        GoalManager::new(Some(dir.join("goals.json").to_str().unwrap()))
+    }
+
+    #[test]
+    fn lowering_completed_progress_reopens_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let id = mgr.create_goal("Test", None, GoalPriority::Medium).unwrap();
+        mgr.update_status(&id, GoalStatus::Completed).unwrap();
+        assert!(mgr.get_goal(&id).unwrap().completed_at.is_some());
+        mgr.update_progress(&id, 50).unwrap();
+        let mut reloaded = manager(dir.path());
+        reloaded.load().unwrap();
+        let goal = reloaded.get_goal(&id).unwrap();
+        assert_eq!(goal.status, GoalStatus::InProgress);
+        assert_eq!(goal.progress, 50);
+        assert_eq!(goal.completed_at, None);
+        assert_eq!(reloaded.get_active_goals().len(), 1);
+    }
+
+    #[test]
+    fn progress_preserves_paused_and_cancelled_status_below_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let id = mgr.create_goal("Test", None, GoalPriority::Medium).unwrap();
+        for status in [GoalStatus::Paused, GoalStatus::Cancelled] {
+            mgr.update_status(&id, status.clone()).unwrap();
+            mgr.update_progress(&id, 40).unwrap();
+            assert_eq!(mgr.get_goal(&id).unwrap().status, status);
+            assert_eq!(mgr.get_goal(&id).unwrap().completed_at, None);
+        }
+        mgr.update_progress(&id, 100).unwrap();
+        assert_eq!(mgr.get_goal(&id).unwrap().status, GoalStatus::Completed);
+    }
+
+    #[test]
+    fn leaving_completed_clears_completion_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let id = mgr.create_goal("Test", None, GoalPriority::Medium).unwrap();
+        for status in [
+            GoalStatus::InProgress,
+            GoalStatus::Paused,
+            GoalStatus::Cancelled,
+        ] {
+            mgr.update_status(&id, GoalStatus::Completed).unwrap();
+            mgr.update_status(&id, status.clone()).unwrap();
+            assert_eq!(mgr.get_goal(&id).unwrap().status, status);
+            assert_eq!(mgr.get_goal(&id).unwrap().completed_at, None);
+            assert_eq!(mgr.get_goal(&id).unwrap().progress, 0);
+        }
+    }
+
+    #[test]
+    fn out_of_range_progress_is_rejected_without_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let id = mgr.create_goal("Test", None, GoalPriority::Medium).unwrap();
+        let before = std::fs::read(dir.path().join("goals.json")).unwrap();
+        for progress in [101, 255] {
+            assert!(mgr.update_progress(&id, progress).is_err());
+            assert_eq!(mgr.get_goal(&id).unwrap().progress, 0);
+            assert_eq!(mgr.get_goal(&id).unwrap().status, GoalStatus::InProgress);
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("goals.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn every_failed_write_preserves_memory_and_existing_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let id = mgr.create_goal("Test", None, GoalPriority::Medium).unwrap();
+        let milestone = mgr.add_milestone(&id, "Step").unwrap();
+        let before = serde_json::to_value(&mgr.goals).unwrap();
+        let stored = std::fs::read(dir.path().join("goals.json")).unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        mgr.persistence = GoalPersistence::new(Some(blocker.join("goals.json").to_str().unwrap()));
+        assert!(mgr.create_goal("New", None, GoalPriority::Medium).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.create_sub_goal(&id, "Child", None).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.update_status(&id, GoalStatus::Completed).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.update_progress(&id, 100).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.add_milestone(&id, "New step").is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.complete_milestone(&id, &milestone).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert!(mgr.delete_goal(&id).is_err());
+        assert_eq!(serde_json::to_value(&mgr.goals).unwrap(), before);
+        assert_eq!(
+            std::fs::read(dir.path().join("goals.json")).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn sub_goal_relationships_persist_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(dir.path());
+        let parent = mgr
+            .create_goal("Parent", None, GoalPriority::Medium)
+            .unwrap();
+        let child = mgr.create_sub_goal(&parent, "Child", None).unwrap();
+        let mut reloaded = manager(dir.path());
+        reloaded.load().unwrap();
+        assert_eq!(
+            reloaded.get_goal(&parent).unwrap().sub_goals,
+            vec![child.clone()]
+        );
+        assert_eq!(
+            reloaded.get_goal(&child).unwrap().parent_id.as_deref(),
+            Some(parent.as_str())
+        );
     }
 }

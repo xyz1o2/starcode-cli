@@ -608,6 +608,7 @@ pub async fn run_ui_loop(
         }
 
         needs_redraw |= crate::ui::services::session_schedules::poll(state, &agent_tx);
+        needs_redraw |= crate::runtime::background::poll_loop_tasks(state, &agent_tx);
 
         // Only draw if needed or enough time passed.
         // Adaptive framerate during streaming: faster when content changes rapidly.

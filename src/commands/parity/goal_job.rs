@@ -12,84 +12,174 @@ use crate::runtime::messages::AgentRequest;
 use crate::types::ChatEntry;
 use std::path::PathBuf;
 
-/// `/goal` — 查看/设置当前目标（项目级持久化）
+/// 参数先校验再加载存储；`--` 或 `add` 可显式创建保留词开头的标题。
+#[derive(Debug, PartialEq, Eq)]
+enum GoalCommand {
+    Help,
+    List { include_done: bool },
+    Create(String),
+    Complete(String),
+    Remove(String),
+    Progress(String, u8),
+}
+
+impl GoalCommand {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        use crate::core::i18n;
+        let Some(first) = args.first() else {
+            return Ok(Self::List {
+                include_done: false,
+            });
+        };
+        let sub = first.to_lowercase();
+        let valid_id = || args.get(1).is_some_and(|id| !id.trim().is_empty());
+        match sub.as_str() {
+            "help" | "--help" | "-h" if args.len() == 1 => Ok(Self::Help),
+            "list" | "all" if args.len() == 1 => Ok(Self::List {
+                include_done: sub == "all",
+            }),
+            "done" | "complete" if args.len() == 2 && valid_id() => {
+                Ok(Self::Complete(args[1].clone()))
+            }
+            "rm" | "delete" if args.len() == 2 && valid_id() => Ok(Self::Remove(args[1].clone())),
+            "progress" if args.len() == 3 && valid_id() => {
+                let value = &args[2];
+                let digits = value.strip_suffix('%').unwrap_or(value);
+                let progress = digits
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|pct| *pct <= 100 && digits.bytes().all(|b| b.is_ascii_digit()))
+                    .ok_or_else(|| {
+                        i18n::t1("cmd.goal.invalid_progress").replace("{value}", value)
+                    })?;
+                Ok(Self::Progress(args[1].clone(), progress))
+            }
+            "help" | "--help" | "-h" | "list" | "all" | "done" | "complete" | "rm" | "delete"
+            | "progress" => Err(i18n::t1("cmd.goal.help")),
+            _ => {
+                let title_args = if matches!(sub.as_str(), "add" | "--") {
+                    &args[1..]
+                } else if first.starts_with('-') {
+                    return Err(i18n::t1("cmd.goal.help"));
+                } else {
+                    args
+                };
+                let title = title_args.join(" ").trim().to_string();
+                if title.is_empty() {
+                    Err(i18n::t1("cmd.goal.help"))
+                } else {
+                    Ok(Self::Create(title))
+                }
+            }
+        }
+    }
+}
+
+/// `/goal` — 查看或修改项目目标，只有持久化成功才显示成功消息。
 pub async fn goal(mut ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
-    use crate::core::goal_tracking::{GoalPriority, GoalStatus};
-
-    let mut mgr = match goal_manager() {
-        Ok(m) => m,
-        Err(e) => {
-            push_msg(&mut ctx, e);
-            return Ok(());
-        }
-    };
-
-    let sub = args.first().map(|s| s.to_lowercase()).unwrap_or_default();
-    let out = match sub.as_str() {
-        "" | "list" | "all" => render_goals(&mgr, sub == "all"),
-        "done" | "complete" => match args.get(1) {
-            None => "Usage: `/goal done <id>`".to_string(),
-            Some(p) => match resolve_goal_id(&mgr, p) {
-                Err(e) => e,
-                Ok(id) => match mgr.update_status(&id, GoalStatus::Completed) {
-                    Ok(()) => {
-                        let _ = mgr.save();
-                        format!("Completed `{}`.", short_id(&id))
-                    }
-                    Err(e) => e.to_string(),
-                },
-            },
-        },
-        "rm" | "delete" => match args.get(1) {
-            None => "Usage: `/goal rm <id>`".to_string(),
-            Some(p) => match resolve_goal_id(&mgr, p) {
-                Err(e) => e,
-                Ok(id) => match mgr.delete_goal(&id) {
-                    Ok(()) => {
-                        let _ = mgr.save();
-                        format!("Deleted `{}`.", short_id(&id))
-                    }
-                    Err(e) => e.to_string(),
-                },
-            },
-        },
-        "progress" => goal_set_progress(&mut mgr, &args),
-        _ => {
-            let title = args.join(" ");
-            let priority = GoalPriority::Medium;
-            let id = mgr.create_goal(&title, None, priority);
-            format!(
-                "Goal set: **{}** (`{}`)\n\nUpdate with `/goal progress {} 50`; finish with `/goal done {}`.",
-                title,
-                short_id(&id),
-                short_id(&id),
-                short_id(&id)
-            )
-        }
-    };
+    let out = goal_output(&args, goal_manager).unwrap_or_else(|error| error);
     push_msg(&mut ctx, out);
     Ok(())
 }
 
-pub(crate) fn goal_set_progress(
-    mgr: &mut crate::core::goal_tracking::GoalManager,
+fn goal_output(
     args: &[String],
-) -> String {
-    let (Some(p), Some(v)) = (args.get(1), args.get(2)) else {
-        return "Usage: `/goal progress <id> <0-100>`".to_string();
-    };
-    let Ok(pct) = v.trim_end_matches('%').parse::<u8>() else {
-        return format!("`{}` is not a percentage (0-100).", v);
-    };
-    match resolve_goal_id(mgr, p) {
-        Err(e) => e,
-        Ok(id) => match mgr.update_progress(&id, pct.min(100)) {
-            Ok(()) => {
-                let _ = mgr.save();
-                format!("`{}` is now {}% complete.", short_id(&id), pct.min(100))
+    load: impl FnOnce() -> Result<crate::core::goal_tracking::GoalManager, String>,
+) -> Result<String, String> {
+    use crate::core::goal_tracking::{GoalPriority, GoalStatus};
+    use crate::core::i18n;
+
+    let command = GoalCommand::parse(args)?;
+    if command == GoalCommand::Help {
+        return Ok(i18n::t1("cmd.goal.help"));
+    }
+    let mut mgr = load()?;
+    match command {
+        GoalCommand::Help => unreachable!(),
+        GoalCommand::List { include_done } => Ok(render_goals(&mgr, include_done)),
+        GoalCommand::Create(title) => {
+            let id = mgr.create_goal(&title, None, GoalPriority::Medium)?;
+            Ok(i18n::t1("cmd.goal.created")
+                .replace("{title}", &title)
+                .replace("{id}", &short_id(&id)))
+        }
+        GoalCommand::Complete(prefix) => {
+            let id = resolve_goal_id(&mgr, &prefix)?;
+            mgr.update_status(&id, GoalStatus::Completed)?;
+            Ok(i18n::t1("cmd.goal.completed").replace("{id}", &short_id(&id)))
+        }
+        GoalCommand::Remove(prefix) => {
+            let id = resolve_goal_id(&mgr, &prefix)?;
+            mgr.delete_goal(&id)?;
+            Ok(i18n::t1("cmd.goal.deleted").replace("{id}", &short_id(&id)))
+        }
+        GoalCommand::Progress(prefix, progress) => {
+            let id = resolve_goal_id(&mgr, &prefix)?;
+            mgr.update_progress(&id, progress)?;
+            Ok(i18n::t1("cmd.goal.progress_updated")
+                .replace("{id}", &short_id(&id))
+                .replace("{progress}", &progress.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+
+    #[test]
+    fn parser_handles_help_reserved_title_and_strict_arguments() {
+        assert_eq!(
+            GoalCommand::parse(&[]).unwrap(),
+            GoalCommand::List {
+                include_done: false
             }
-            Err(e) => e.to_string(),
-        },
+        );
+        assert_eq!(
+            GoalCommand::parse(&["--help".into()]).unwrap(),
+            GoalCommand::Help
+        );
+        assert_eq!(
+            GoalCommand::parse(&["add".into(), "progress".into()]).unwrap(),
+            GoalCommand::Create("progress".into())
+        );
+        assert_eq!(
+            GoalCommand::parse(&["--".into(), "done".into(), "my".into(), "goal".into()]).unwrap(),
+            GoalCommand::Create("done my goal".into())
+        );
+        assert!(GoalCommand::parse(&["done".into()]).is_err());
+        assert!(GoalCommand::parse(&["list".into(), "unexpected".into()]).is_err());
+        for value in ["101", "255", "-1", "30%%"] {
+            assert!(GoalCommand::parse(&["progress".into(), "id".into(), value.into()]).is_err());
+        }
+        assert_eq!(
+            GoalCommand::parse(&["progress".into(), "id".into(), "100%".into()]).unwrap(),
+            GoalCommand::Progress("id".into(), 100)
+        );
+    }
+
+    #[test]
+    fn help_and_invalid_arguments_do_not_load_storage() {
+        assert!(goal_output(&["--help".into()], || panic!("help must not load storage")).is_ok());
+        assert!(goal_output(&["done".into()], || panic!(
+            "invalid input must not load storage"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn create_reports_persistence_failure_without_success_text() {
+        use crate::core::goal_tracking::GoalManager;
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let path = blocker.join("goals.json");
+        let result = goal_output(&["A goal".into()], || {
+            let mut mgr = GoalManager::new(Some(path.to_str().unwrap()));
+            mgr.load()?;
+            Ok(mgr)
+        });
+        assert!(result.unwrap_err().contains("Failed to create directory"));
     }
 }
 

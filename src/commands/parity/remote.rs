@@ -5,7 +5,6 @@ use crate::commands::parity::core::on_off;
 use crate::commands::parity::core::push_msg;
 use crate::commands::parity::core::redact;
 use crate::commands::parity::core::run;
-use crate::commands::parity::core::star_dir;
 use crate::runtime::messages::AgentRequest;
 use crate::types::ChatEntry;
 use std::path::PathBuf;
@@ -249,7 +248,8 @@ pub async fn desktop(mut ctx: CommandContext<'_>, _args: Vec<String>) -> Command
 
 /// 项目级 goal 存储（`.star/goals.json`），比默认的 `~/.starcode/goals.json` 更贴合仓库
 pub(crate) fn goal_manager() -> Result<crate::core::goal_tracking::GoalManager, String> {
-    let path = star_dir()?.join("goals.json");
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let path = crate::core::goal_tracking::persistence::project_goals_path(&cwd);
     let mut mgr =
         crate::core::goal_tracking::GoalManager::new(Some(path.to_string_lossy().as_ref()));
     mgr.load()?;

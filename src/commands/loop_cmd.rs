@@ -1,28 +1,64 @@
+/// 独立循环命令：解析先于存储访问；只在持久化成功后反馈或清理待发任务。
 use crate::commands::execution::{CommandContext, CommandResult};
+use crate::core::i18n;
 use chrono::{Local, TimeZone, Utc};
-use clap::Subcommand;
+use clap::{FromArgMatches, Subcommand};
 
-#[derive(Subcommand)]
+#[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum LoopCommand {
-    /// Add a scheduled loop task
+    /// 创建定时提示词任务。
     #[command(arg_required_else_help = true)]
     Add {
-        /// Unique loop task name
+        /// 项目内唯一的任务名。
         name: String,
-        /// Trigger interval in minutes
+        /// 正整数分钟间隔。
         every_minutes: u64,
-        /// Prompt to send when task is triggered
-        #[arg(required = true)]
+        /// 后续参数均作为提示词，保留命令行选项。
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,
     },
-    /// List scheduled loop tasks
+    /// 列出任务。
     List,
-    /// Remove a scheduled loop task by name
+    /// 删除任务。
     #[command(arg_required_else_help = true)]
-    Remove {
-        /// Task name
-        name: String,
-    },
+    Remove { name: String },
+    /// 暂停后续调度，不中断正在运行的一轮。
+    #[command(arg_required_else_help = true)]
+    Pause { name: String },
+    /// 恢复调度，从现在开始等待一个完整间隔。
+    #[command(arg_required_else_help = true)]
+    Resume { name: String },
+}
+
+fn parse_command(args: Vec<String>) -> Result<Option<LoopCommand>, String> {
+    if args.is_empty() {
+        return Ok(Some(LoopCommand::List));
+    }
+    let command = LoopCommand::augment_subcommands(clap::Command::new("loop"));
+    match command.try_get_matches_from(std::iter::once("loop".to_string()).chain(args)) {
+        Ok(matches) => LoopCommand::from_arg_matches(&matches)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if matches!(error.kind(), clap::error::ErrorKind::DisplayHelp) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
+    match parse_command(args) {
+        Ok(Some(command)) => execute_loop_command(ctx, command).await,
+        result => {
+            let help = i18n::t1("cmd.loop.help");
+            let text = match result {
+                Err(error) => format!("{error}\n{help}"),
+                _ => help,
+            };
+            ctx.state
+                .chat_history
+                .push(crate::types::ChatEntry::assistant(text).with_streaming(false));
+            Ok(())
+        }
+    }
 }
 
 pub async fn execute_loop_command(ctx: CommandContext<'_>, cmd: LoopCommand) -> CommandResult {
@@ -46,13 +82,14 @@ pub(crate) async fn execute_loop_command_in(
             let prompt_text = prompt.join(" ").trim().to_string();
             let task = crate::core::loops::add_task(cwd, name.clone(), every_minutes, prompt_text)
                 .await
-                .map_err(|e| format!("Failed to add loop task: {}", e))?;
+                .map_err(|e| i18n::t1("cmd.loop.add_failed").replace("{error}", &e))?;
 
-            let next_time = format_ts(task.next_run_at);
-            let msg = format!(
-                "Created /loop task `{}`.\n\n- Interval: every {} minutes\n- Next run: {}\n- Prompt: {}\n\nUse `/loop list` to view tasks or `/loop remove {}` to delete it.",
-                task.name, task.interval_minutes, next_time, task.prompt, task.name
-            );
+            crate::runtime::background::allow_loop_task(ctx.state, cwd, &task.name);
+            let msg = i18n::t1("cmd.loop.created")
+                .replace("{minutes}", &task.interval_minutes.to_string())
+                .replace("{next}", &format_ts(task.next_run_at))
+                .replace("{name}", &task.name)
+                .replace("{prompt}", &task.prompt);
 
             ctx.state
                 .chat_history
@@ -62,51 +99,86 @@ pub(crate) async fn execute_loop_command_in(
         LoopCommand::List => {
             let tasks = crate::core::loops::list_tasks(cwd)
                 .await
-                .map_err(|e| format!("Failed to list loop tasks: {}", e))?;
+                .map_err(|e| i18n::t1("cmd.loop.list_failed").replace("{error}", &e))?;
 
             if tasks.is_empty() {
                 ctx.state.chat_history.push(
-                    crate::types::ChatEntry::assistant(
-                        "No /loop tasks. Use `/loop add <name> <minutes> <prompt...>` to create one.",
-                    )
-                    .with_streaming(false),
+                    crate::types::ChatEntry::assistant(i18n::t1("cmd.loop.empty"))
+                        .with_streaming(false),
                 );
                 return Ok(());
             }
 
             let now = Utc::now().timestamp();
-            let mut lines = vec!["# /loop tasks\n".to_string()];
+            let mut lines = vec![i18n::t1("cmd.loop.list_title")];
             for t in tasks {
-                let status = if t.enabled { "enabled" } else { "disabled" };
-                let in_minutes = ((t.next_run_at - now).max(0) as f64 / 60.0).ceil() as i64;
-                lines.push(format!(
-                    "- `{}` [{}]\n  - Interval: every {} minutes\n  - Next run: {} (in approximately {} minutes)\n  - Prompt: {}",
-                    t.name,
-                    status,
-                    t.interval_minutes,
-                    format_ts(t.next_run_at),
-                    in_minutes,
-                    t.prompt
-                ));
+                let status = if t.enabled {
+                    i18n::t1("cmd.loop.enabled")
+                } else {
+                    i18n::t1("cmd.loop.disabled")
+                };
+                let next = if t.enabled {
+                    let seconds = t.next_run_at.saturating_sub(now).max(0);
+                    let minutes = seconds / 60 + i64::from(seconds % 60 != 0);
+                    i18n::t1("cmd.loop.next_run")
+                        .replace("{next}", &format_ts(t.next_run_at))
+                        .replace("{minutes}", &minutes.to_string())
+                } else {
+                    i18n::t1("cmd.loop.not_scheduled")
+                };
+                lines.push(
+                    i18n::t1("cmd.loop.list_entry")
+                        .replace("{status}", &status)
+                        .replace("{minutes}", &t.interval_minutes.to_string())
+                        .replace("{next}", &next)
+                        .replace("{name}", &t.name)
+                        .replace("{prompt}", &t.prompt),
+                );
             }
+            lines.push(i18n::t1("cmd.loop.list_hint"));
 
             ctx.state
                 .chat_history
                 .push(crate::types::ChatEntry::assistant(lines.join("\n")).with_streaming(false));
             Ok(())
         }
+        command @ (LoopCommand::Pause { .. } | LoopCommand::Resume { .. }) => {
+            let (name, enabled) = match command {
+                LoopCommand::Pause { name } => (name, false),
+                LoopCommand::Resume { name } => (name, true),
+                _ => unreachable!(),
+            };
+            let task = crate::core::loops::set_task_enabled(cwd, &name, enabled)
+                .await
+                .map_err(|error| i18n::t1("cmd.loop.change_failed").replace("{error}", &error))?;
+            let msg = if let Some(task) = task {
+                if enabled {
+                    crate::runtime::background::allow_loop_task(ctx.state, cwd, &task.name);
+                    i18n::t1("cmd.loop.resumed")
+                        .replace("{next}", &format_ts(task.next_run_at))
+                        .replace("{name}", &task.name)
+                } else {
+                    crate::runtime::background::suppress_loop_task(ctx.state, cwd, &task.name);
+                    i18n::t1("cmd.loop.paused").replace("{name}", &task.name)
+                }
+            } else {
+                i18n::t1("cmd.loop.not_found").replace("{name}", name.trim())
+            };
+            ctx.state
+                .chat_history
+                .push(crate::types::ChatEntry::assistant(msg).with_streaming(false));
+            Ok(())
+        }
         LoopCommand::Remove { name } => {
             let removed = crate::core::loops::remove_task(cwd, &name)
                 .await
-                .map_err(|e| format!("Failed to remove loop task: {}", e))?;
+                .map_err(|e| i18n::t1("cmd.loop.remove_failed").replace("{error}", &e))?;
 
+            crate::runtime::background::suppress_loop_task(ctx.state, cwd, name.trim());
             let msg = if removed {
-                format!("Removed /loop task `{}`.", name)
+                i18n::t1("cmd.loop.removed").replace("{name}", name.trim())
             } else {
-                format!(
-                    "Could not find /loop task `{}`. Use `/loop list` to view existing tasks.",
-                    name
-                )
+                i18n::t1("cmd.loop.not_found").replace("{name}", name.trim())
             };
 
             ctx.state
@@ -195,7 +267,7 @@ mod tests {
         let err = run_in(dir.path(), add("bad", 0, "loop forever"))
             .await
             .unwrap_err();
-        assert!(err.contains("Failed to add loop task"), "{err}");
+        assert!(err.contains("Failed to add /loop task"), "{err}");
         assert!(!crate::core::loops::loops_file_path(dir.path()).exists());
     }
 
@@ -242,6 +314,153 @@ mod tests {
             again.contains("Could not find /loop task `standup`"),
             "{again}"
         );
+    }
+
+    fn parse(args: &[&str]) -> Result<Option<LoopCommand>, String> {
+        parse_command(args.iter().map(|arg| (*arg).to_owned()).collect())
+    }
+
+    #[test]
+    fn parser_defaults_to_list_and_accepts_help_without_a_task() {
+        assert_eq!(parse(&[]).unwrap(), Some(LoopCommand::List));
+        assert_eq!(parse(&["--help"]).unwrap(), None);
+        assert_eq!(parse(&["add", "--help"]).unwrap(), None);
+        assert_eq!(
+            parse(&["pause", "work"]).unwrap(),
+            Some(LoopCommand::Pause {
+                name: "work".into()
+            })
+        );
+        assert_eq!(
+            parse(&["resume", "work"]).unwrap(),
+            Some(LoopCommand::Resume {
+                name: "work".into()
+            })
+        );
+    }
+
+    #[test]
+    fn parser_rejects_missing_extra_and_invalid_arguments() {
+        for args in [
+            vec!["unknown"],
+            vec!["add"],
+            vec!["add", "name", "1"],
+            vec!["add", "name", "-1", "prompt"],
+            vec!["add", "name", "x", "prompt"],
+            vec!["list", "extra"],
+            vec!["pause"],
+            vec!["resume"],
+            vec!["remove"],
+            vec!["remove", "name", "extra"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn parser_keeps_flags_in_the_prompt() {
+        assert_eq!(
+            parse(&[
+                "add",
+                "tests",
+                "5",
+                "run",
+                "cargo",
+                "test",
+                "--lib",
+                "--",
+                "--nocapture"
+            ])
+            .unwrap(),
+            Some(LoopCommand::Add {
+                name: "tests".into(),
+                every_minutes: 5,
+                prompt: ["run", "cargo", "test", "--lib", "--", "--nocapture"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_resume_and_missing_task_feedback_match_persisted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        run_in(dir.path(), add("work", 1, "prompt")).await.unwrap();
+        let paused = run_in(
+            dir.path(),
+            LoopCommand::Pause {
+                name: "work".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(paused.contains("Paused /loop task `work`"), "{paused}");
+        let listed = run_in(dir.path(), LoopCommand::List).await.unwrap();
+        assert!(listed.contains("[paused]"), "{listed}");
+        assert!(listed.contains("Not scheduled while paused"), "{listed}");
+        assert!(!listed.contains("Next run:"), "{listed}");
+        assert!(!crate::core::loops::list_tasks(dir.path()).await.unwrap()[0].enabled);
+        let resumed = run_in(
+            dir.path(),
+            LoopCommand::Resume {
+                name: "work".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(resumed.contains("Resumed /loop task `work`"), "{resumed}");
+        assert!(crate::core::loops::list_tasks(dir.path()).await.unwrap()[0].enabled);
+        for cmd in [
+            LoopCommand::Pause {
+                name: "missing".into(),
+            },
+            LoopCommand::Resume {
+                name: "missing".into(),
+            },
+        ] {
+            let missing = run_in(dir.path(), cmd).await.unwrap();
+            assert!(
+                missing.contains("Could not find /loop task `missing`"),
+                "{missing}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_storage_does_not_emit_success_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::core::loops::loops_file_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "invalid JSON").unwrap();
+        let mut state = ChatState::test_fixture();
+        let history_len = state.chat_history.len();
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        for cmd in [
+            add("work", 1, "prompt"),
+            LoopCommand::Pause {
+                name: "work".into(),
+            },
+            LoopCommand::Resume {
+                name: "work".into(),
+            },
+            LoopCommand::Remove {
+                name: "work".into(),
+            },
+        ] {
+            assert!(execute_loop_command_in(
+                CommandContext {
+                    state: &mut state,
+                    agent_tx: &agent_tx
+                },
+                cmd,
+                dir.path()
+            )
+            .await
+            .is_err());
+            assert_eq!(state.chat_history.len(), history_len);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid JSON");
+        }
     }
 
     #[test]

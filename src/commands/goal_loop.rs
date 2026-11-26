@@ -67,14 +67,11 @@ pub(crate) async fn execute_goal_loop_command_in(
 
 type LoopOutput = Result<String, String>;
 
-/// 项目级 goal 存储。不复用 `parity::goal_manager()` —— 那个读进程 cwd，
-/// 单测没法定向到临时目录。
+/// 通过共享解析器定位项目级 goal 存储；显式传入 cwd，避免单测读写开发者目录。
 fn goal_manager_in(
     cwd: &std::path::Path,
 ) -> Result<crate::core::goal_tracking::GoalManager, String> {
-    let dir = cwd.join(".star");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("goals.json");
+    let path = crate::core::goal_tracking::persistence::project_goals_path(cwd);
     let mut mgr =
         crate::core::goal_tracking::GoalManager::new(Some(path.to_string_lossy().as_ref()));
     mgr.load()?;
@@ -145,7 +142,7 @@ async fn start_goal_loop(
                 (hits[0].clone(), g.title.clone())
             }
             0 => {
-                let id = mgr.create_goal(&title, None, GoalPriority::Medium);
+                let id = mgr.create_goal(&title, None, GoalPriority::Medium)?;
                 (id, title.clone())
             }
             n => {
@@ -319,6 +316,134 @@ mod tests {
             every_minutes: every,
             max_iterations: max,
         }
+    }
+
+    #[tokio::test]
+    async fn reading_a_fresh_project_from_a_subdirectory_creates_no_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("src/nested");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+
+        let state_dir = dir.path().join(".star");
+        assert_eq!(
+            crate::core::loops::loops_file_path(&child),
+            state_dir.join("loops.json")
+        );
+        assert_eq!(
+            crate::core::loops::goal_loops_file_path(&child),
+            state_dir.join("goal_loops.json")
+        );
+        assert!(goal_manager_in(&child).unwrap().get_all_goals().is_empty());
+        run_in(&child, GoalLoopCommand::List).await.unwrap();
+        assert!(crate::core::loops::list_tasks(&child)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(crate::core::loops::goal_prompt_for(&child, "missing")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!dir.path().join(".star").exists());
+        assert!(!child.join(".star").exists());
+    }
+
+    #[tokio::test]
+    async fn subdirectory_start_shares_goal_and_loop_paths_with_the_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("src/nested");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+
+        run_in(&child, start("Shared goal", 5, 10)).await.unwrap();
+        let mut mgr = goal_manager_in(dir.path()).unwrap();
+        assert_eq!(mgr.get_all_goals().len(), 1);
+        let id = mgr.get_all_goals()[0].id.clone();
+        assert!(goal_manager_in(&child).unwrap().get_goal(&id).is_some());
+
+        let tasks = crate::core::loops::list_goal_loops(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].goal_id, id);
+        assert_eq!(
+            crate::core::loops::list_goal_loops(&child)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(crate::core::loops::goal_prompt_for(&child, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("Shared goal"));
+
+        let state_dir = dir.path().join(".star");
+        assert_eq!(
+            crate::core::goal_tracking::persistence::project_goals_path(&child),
+            state_dir.join("goals.json")
+        );
+        assert_eq!(
+            crate::core::loops::goal_loops_file_path(&child),
+            state_dir.join("goal_loops.json")
+        );
+        assert_eq!(
+            crate::core::loops::loops_file_path(&child),
+            state_dir.join("loops.json")
+        );
+        crate::core::loops::add_task(&child, "shared-loop".into(), 5, "Check progress".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::core::loops::list_tasks(dir.path())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for name in ["goals.json", "goal_loops.json", "loops.json"] {
+            assert!(state_dir.join(name).exists());
+        }
+        assert!(!child.join(".star").exists());
+
+        // 根目录完成目标后，子目录 scheduler 必须读到同一状态并自动收口。
+        mgr.update_status(&id, GoalStatus::Completed).unwrap();
+        let due =
+            crate::core::loops::tick_and_collect_due_goal_loops(&child, Utc::now().timestamp())
+                .await
+                .unwrap();
+        assert!(due.is_empty());
+        let tasks = crate::core::loops::list_goal_loops(dir.path())
+            .await
+            .unwrap();
+        assert!(tasks[0].finished);
+        assert_eq!(tasks[0].finish_reason.as_deref(), Some("goal_completed"));
+    }
+
+    #[tokio::test]
+    async fn subdirectory_start_binds_an_existing_project_goal_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("src/nested");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        let id = "11111111-2222-3333-4444-555555555555";
+        seed_goals(
+            dir.path(),
+            &[goal(id, "Existing goal", GoalStatus::InProgress)],
+        );
+
+        let out = run_in(&child, start("1111", 5, 10)).await.unwrap();
+        assert!(out.contains("Existing goal"), "{out}");
+        let mgr = goal_manager_in(dir.path()).unwrap();
+        assert_eq!(mgr.get_all_goals().len(), 1);
+        assert!(mgr.get_goal(id).is_some());
+        let tasks = crate::core::loops::list_goal_loops(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].goal_id, id);
+        assert!(!child.join(".star").exists());
     }
 
     #[tokio::test]

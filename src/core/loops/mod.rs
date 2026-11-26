@@ -1,6 +1,31 @@
+/// 持久化循环调度：普通任务的读改写在进程内串行，磁盘替换不暴露半份 JSON。
+/// 调度计算使用宽整数直接跳到未来，不逐次补跑；错误返回调用方，非法旧间隔停用。
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+// UI 命令与后台 tick 共享同一把锁，防止读改写覆盖；不提供跨进程互斥。
+static LOOP_STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn interval_seconds(minutes: u64) -> Result<i64, String> {
+    i64::try_from(minutes)
+        .ok()
+        .and_then(|value| value.checked_mul(60))
+        .filter(|value| *value > 0)
+        .ok_or_else(|| crate::core::i18n::t1("cmd.loop.invalid_interval"))
+}
+
+/// 保持原有节拍，常数时间跳过遗漏周期；无法表示未来时间时返回 None。
+fn next_scheduled_time(next: i64, now: i64, interval: i64) -> Option<i64> {
+    if interval <= 0 {
+        return None;
+    }
+    if next > now {
+        return Some(next);
+    }
+    let steps = (i128::from(now) - i128::from(next)) / i128::from(interval) + 1;
+    i64::try_from(i128::from(next) + steps * i128::from(interval)).ok()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopTask {
@@ -12,10 +37,10 @@ pub struct LoopTask {
     pub updated_at: i64,
     pub last_run_at: Option<i64>,
     pub next_run_at: i64,
-    /// Track task completions to prevent re-execution
+    /// 明确完成信号的计数；派发本身不代表完成。
     #[serde(default)]
     pub completion_count: u64,
-    /// Last completion timestamp
+    /// 最近一次明确完成的时间。
     #[serde(default)]
     pub last_completed_at: Option<i64>,
 }
@@ -26,7 +51,7 @@ pub struct LoopStore {
 }
 
 pub fn loops_file_path(project_root: &Path) -> PathBuf {
-    project_root.join(".star").join("loops.json")
+    crate::core::goal_tracking::persistence::project_state_dir(project_root).join("loops.json")
 }
 
 async fn ensure_parent_dir(path: &Path) -> Result<(), String> {
@@ -61,12 +86,22 @@ pub async fn save_store(project_root: &Path, store: &LoopStore) -> Result<(), St
     let path = loops_file_path(project_root);
     ensure_parent_dir(&path).await?;
 
-    let content = serde_json::to_string_pretty(store)
+    let content = serde_json::to_vec_pretty(store)
         .map_err(|e| format!("Failed to serialize loop store: {}", e))?;
 
-    tokio::fs::write(&path, content)
-        .await
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let write = || -> std::io::Result<()> {
+            let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+            temporary.write_all(&content)?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(&path).map_err(|error| error.error)?;
+            Ok(())
+        };
+        write().map_err(|error| format!("Failed to write {}: {}", path.display(), error))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn list_tasks(project_root: &Path) -> Result<Vec<LoopTask>, String> {
@@ -80,23 +115,26 @@ pub async fn add_task(
     interval_minutes: u64,
     prompt: String,
 ) -> Result<LoopTask, String> {
-    if interval_minutes == 0 {
-        return Err("interval_minutes must be greater than 0".to_string());
+    let interval_secs = interval_seconds(interval_minutes)?;
+    let name = name.trim().to_string();
+    let prompt = prompt.trim().to_string();
+    if name.is_empty() {
+        return Err(crate::core::i18n::t1("cmd.loop.empty_name"));
     }
-    if name.trim().is_empty() {
-        return Err("task name cannot be empty".to_string());
-    }
-    if prompt.trim().is_empty() {
-        return Err("prompt cannot be empty".to_string());
+    if prompt.is_empty() {
+        return Err(crate::core::i18n::t1("cmd.loop.empty_prompt"));
     }
 
+    let _guard = LOOP_STORE_LOCK.lock().await;
     let mut store = load_store(project_root).await?;
     if store.tasks.iter().any(|t| t.name == name) {
-        return Err(format!("loop task '{}' already exists", name));
+        return Err(crate::core::i18n::t1("cmd.loop.duplicate").replace("{name}", &name));
     }
 
     let now = Utc::now().timestamp();
-    let interval_secs = (interval_minutes as i64).saturating_mul(60);
+    let next_run_at = now
+        .checked_add(interval_secs)
+        .ok_or_else(|| crate::core::i18n::t1("cmd.loop.invalid_interval"))?;
 
     let task = LoopTask {
         name,
@@ -106,7 +144,7 @@ pub async fn add_task(
         created_at: now,
         updated_at: now,
         last_run_at: None,
-        next_run_at: now.saturating_add(interval_secs),
+        next_run_at,
         completion_count: 0,
         last_completed_at: None,
     };
@@ -117,7 +155,36 @@ pub async fn add_task(
     Ok(task)
 }
 
+/// 暂停不丢失任务；从暂停恢复时等待一个完整间隔，不补跑暂停期间的任务。
+pub async fn set_task_enabled(
+    project_root: &Path,
+    name: &str,
+    enabled: bool,
+) -> Result<Option<LoopTask>, String> {
+    let _guard = LOOP_STORE_LOCK.lock().await;
+    let mut store = load_store(project_root).await?;
+    let Some(task) = store.tasks.iter_mut().find(|task| task.name == name.trim()) else {
+        return Ok(None);
+    };
+    if task.enabled != enabled {
+        let now = Utc::now().timestamp();
+        if enabled {
+            task.next_run_at = now
+                .checked_add(interval_seconds(task.interval_minutes)?)
+                .ok_or_else(|| crate::core::i18n::t1("cmd.loop.invalid_interval"))?;
+        }
+        task.enabled = enabled;
+        task.updated_at = now;
+        let task = task.clone();
+        save_store(project_root, &store).await?;
+        return Ok(Some(task));
+    }
+    Ok(Some(task.clone()))
+}
+
 pub async fn remove_task(project_root: &Path, name: &str) -> Result<bool, String> {
+    let _guard = LOOP_STORE_LOCK.lock().await;
+    let name = name.trim();
     let mut store = load_store(project_root).await?;
     let before = store.tasks.len();
     store.tasks.retain(|t| t.name != name);
@@ -134,45 +201,39 @@ pub async fn tick_and_collect_due_tasks(
     project_root: &Path,
     now_ts: i64,
 ) -> Result<Vec<LoopTask>, String> {
+    let _guard = LOOP_STORE_LOCK.lock().await;
     let mut store = load_store(project_root).await?;
     let mut due = Vec::new();
     let mut dirty = false;
 
     for task in &mut store.tasks {
-        if !task.enabled || task.interval_minutes == 0 {
+        if !task.enabled {
             continue;
         }
-
-        let interval_secs = (task.interval_minutes as i64).saturating_mul(60);
-
-        // If next_run_at is far in the past (e.g., session resume after hours),
-        // skip missed executions and just schedule the next one.
-        // Only trigger if the task was due within the last 2x interval.
-        let elapsed = now_ts.saturating_sub(task.next_run_at);
-        if elapsed > interval_secs * 2 {
-            // Task was due long ago — skip and reschedule
-            let mut next_run = task.next_run_at;
-            while next_run <= now_ts {
-                next_run = next_run.saturating_add(interval_secs);
-            }
-            task.next_run_at = next_run;
+        let interval = interval_seconds(task.interval_minutes).ok();
+        let next =
+            interval.and_then(|seconds| next_scheduled_time(task.next_run_at, now_ts, seconds));
+        let (Some(interval), Some(next)) = (interval, next) else {
+            // 旧文件中的非法间隔或时间上界不能卡死整个调度器。
+            task.enabled = false;
             task.updated_at = now_ts;
             dirty = true;
             continue;
+        };
+        if task.next_run_at > now_ts {
+            continue;
         }
 
-        if task.next_run_at <= now_ts {
-            let mut next_run = task.next_run_at;
-            while next_run <= now_ts {
-                next_run = next_run.saturating_add(interval_secs);
-            }
-
+        // 重启后不补跑积压；最多允许迟到两个周期，并保持原有节拍。
+        let elapsed = i128::from(now_ts) - i128::from(task.next_run_at);
+        let should_run = elapsed <= i128::from(interval) * 2;
+        task.next_run_at = next;
+        task.updated_at = now_ts;
+        if should_run {
             task.last_run_at = Some(now_ts);
-            task.next_run_at = next_run;
-            task.updated_at = now_ts;
             due.push(task.clone());
-            dirty = true;
         }
+        dirty = true;
     }
 
     if dirty {
@@ -182,11 +243,12 @@ pub async fn tick_and_collect_due_tasks(
     Ok(due)
 }
 
-/// Mark a task as completed. This prevents re-execution until the next interval.
+/// 记录完成信息；只有明确收到该任务完成信号的调用方才应使用。
 pub async fn mark_task_completed(project_root: &Path, task_name: &str) -> Result<(), String> {
+    let _guard = LOOP_STORE_LOCK.lock().await;
     let mut store = load_store(project_root).await?;
     if let Some(task) = store.tasks.iter_mut().find(|t| t.name == task_name) {
-        task.completion_count += 1;
+        task.completion_count = task.completion_count.saturating_add(1);
         task.last_completed_at = Some(chrono::Utc::now().timestamp());
         task.updated_at = chrono::Utc::now().timestamp();
         save_store(project_root, &store).await?;
@@ -194,16 +256,276 @@ pub async fn mark_task_completed(project_root: &Path, task_name: &str) -> Result
     Ok(())
 }
 
-/// Check if a task was recently completed (within the last interval).
-/// Returns true if the task should be skipped.
+/// 兼容旧调用方的半周期完成去重，不代表调度派发已经完成。
 pub fn is_task_recently_completed(task: &LoopTask, now_ts: i64) -> bool {
-    if let Some(last_completed) = task.last_completed_at {
-        let interval_secs = (task.interval_minutes as i64).saturating_mul(60);
-        let elapsed = now_ts.saturating_sub(last_completed);
-        // Skip if completed within the last 50% of the interval
-        elapsed < interval_secs / 2
-    } else {
-        false
+    match (
+        task.last_completed_at,
+        interval_seconds(task.interval_minutes),
+    ) {
+        (Some(last), Ok(interval)) => {
+            let elapsed = i128::from(now_ts) - i128::from(last);
+            elapsed >= 0 && elapsed < i128::from(interval) / 2
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(name: &str, minutes: u64, next: i64) -> LoopTask {
+        LoopTask {
+            name: name.into(),
+            prompt: "check the build".into(),
+            interval_minutes: minutes,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+            last_run_at: None,
+            next_run_at: next,
+            completion_count: 0,
+            last_completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_inputs_do_not_create_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        for minutes in [0, u64::MAX, i64::MAX as u64 / 60 + 1, i64::MAX as u64 / 60] {
+            assert!(add_task(dir.path(), "bad".into(), minutes, "prompt".into())
+                .await
+                .is_err());
+        }
+        assert!(add_task(dir.path(), "  ".into(), 1, "prompt".into())
+            .await
+            .is_err());
+        assert!(add_task(dir.path(), "valid".into(), 1, "  ".into())
+            .await
+            .is_err());
+        assert!(!loops_file_path(dir.path()).parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn names_and_prompts_are_trimmed_before_duplicate_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let added = add_task(dir.path(), " check ".into(), 1, " prompt ".into())
+            .await
+            .unwrap();
+        assert_eq!(added.name, "check");
+        assert_eq!(added.prompt, "prompt");
+        assert_eq!(added.next_run_at - added.created_at, 60);
+        assert!(add_task(dir.path(), "check ".into(), 1, "another".into())
+            .await
+            .is_err());
+        assert_eq!(list_tasks(dir.path()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn due_tasks_run_once_and_keep_the_original_cadence() {
+        let dir = tempfile::tempdir().unwrap();
+        save_store(
+            dir.path(),
+            &LoopStore {
+                tasks: vec![task("due", 1, 100)],
+            },
+        )
+        .await
+        .unwrap();
+        let due = tick_and_collect_due_tasks(dir.path(), 170).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].next_run_at, 220);
+        assert_eq!(due[0].last_run_at, Some(170));
+        assert_eq!(due[0].completion_count, 0);
+        assert!(tick_and_collect_due_tasks(dir.path(), 170)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(list_tasks(dir.path()).await.unwrap()[0].next_run_at, 220);
+    }
+
+    #[tokio::test]
+    async fn stale_tasks_skip_backlog_in_constant_time() {
+        let dir = tempfile::tempdir().unwrap();
+        save_store(
+            dir.path(),
+            &LoopStore {
+                tasks: vec![task("old", 1, i64::MIN)],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tick_and_collect_due_tasks(dir.path(), 1_000)
+            .await
+            .unwrap()
+            .is_empty());
+        let old = list_tasks(dir.path()).await.unwrap().remove(0);
+        assert!(old.enabled);
+        assert!(old.next_run_at > 1_000 && old.next_run_at <= 1_060);
+        assert_eq!((i128::from(old.next_run_at) - i128::from(i64::MIN)) % 60, 0);
+        assert_eq!(old.last_run_at, None);
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_intervals_and_time_overflow_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        save_store(
+            dir.path(),
+            &LoopStore {
+                tasks: vec![
+                    task("zero", 0, 0),
+                    task("overflow", u64::MAX, 0),
+                    task("end", 1, i64::MAX),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tick_and_collect_due_tasks(dir.path(), i64::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(list_tasks(dir.path())
+            .await
+            .unwrap()
+            .iter()
+            .all(|task| !task.enabled));
+        assert_eq!(
+            next_scheduled_time(i64::MIN, i64::MIN, 60),
+            Some(i64::MIN + 60)
+        );
+        assert_eq!(next_scheduled_time(0, i64::MAX, 60), None);
+    }
+
+    #[tokio::test]
+    async fn pause_resume_and_repeated_resume_have_stable_schedules() {
+        let dir = tempfile::tempdir().unwrap();
+        save_store(
+            dir.path(),
+            &LoopStore {
+                tasks: vec![task("work", 5, 100)],
+            },
+        )
+        .await
+        .unwrap();
+        let paused = set_task_enabled(dir.path(), " work ", false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!paused.enabled);
+        assert_eq!(paused.next_run_at, 100);
+        assert!(tick_and_collect_due_tasks(dir.path(), 101)
+            .await
+            .unwrap()
+            .is_empty());
+        let before = Utc::now().timestamp();
+        let resumed = set_task_enabled(dir.path(), "work", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let after = Utc::now().timestamp();
+        assert!(resumed.enabled);
+        assert!((before + 300..=after + 300).contains(&resumed.next_run_at));
+        let repeated = set_task_enabled(dir.path(), "work", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated.next_run_at, resumed.next_run_at);
+        assert_eq!(repeated.updated_at, resumed.updated_at);
+    }
+
+    #[tokio::test]
+    async fn readonly_and_missing_mutations_do_not_create_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_tasks(dir.path()).await.unwrap().is_empty());
+        assert!(tick_and_collect_due_tasks(dir.path(), 100)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!remove_task(dir.path(), "missing").await.unwrap());
+        assert!(set_task_enabled(dir.path(), "missing", true)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!loops_file_path(dir.path()).parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_production_mutations_do_not_lose_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        save_store(
+            dir.path(),
+            &LoopStore {
+                tasks: vec![task("due", 1, 100), task("remove", 1, 200)],
+            },
+        )
+        .await
+        .unwrap();
+        let (added, due, removed) = tokio::join!(
+            add_task(dir.path(), "new".into(), 1, "prompt".into()),
+            tick_and_collect_due_tasks(dir.path(), 100),
+            remove_task(dir.path(), "remove"),
+        );
+        added.unwrap();
+        assert_eq!(due.unwrap().len(), 1);
+        assert!(removed.unwrap());
+        let tasks = list_tasks(dir.path()).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|task| task.name == "new"));
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.name == "due")
+                .unwrap()
+                .next_run_at,
+            160
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_storage_operations_preserve_existing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = loops_file_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(add_task(dir.path(), "new".into(), 1, "prompt".into())
+            .await
+            .is_err());
+        assert!(remove_task(dir.path(), "new").await.is_err());
+        assert!(set_task_enabled(dir.path(), "new", false).await.is_err());
+        assert!(tick_and_collect_due_tasks(dir.path(), 100).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid JSON");
+
+        let blocked = tempfile::tempdir().unwrap();
+        let target = loops_file_path(blocked.path());
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), "unchanged").unwrap();
+        assert!(save_store(blocked.path(), &LoopStore::default())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join("keep")).unwrap(),
+            "unchanged"
+        );
+        assert_eq!(
+            std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_project_commands_share_one_loop_store() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(loops_file_path(&nested), loops_file_path(dir.path()));
+        add_task(&nested, "work".into(), 1, "prompt".into())
+            .await
+            .unwrap();
+        assert_eq!(list_tasks(dir.path()).await.unwrap().len(), 1);
+        assert!(remove_task(dir.path(), "work").await.unwrap());
+        assert!(list_tasks(&nested).await.unwrap().is_empty());
     }
 }
 
@@ -255,7 +577,7 @@ pub struct GoalLoopStore {
 }
 
 pub fn goal_loops_file_path(project_root: &Path) -> PathBuf {
-    project_root.join(".star").join("goal_loops.json")
+    crate::core::goal_tracking::persistence::project_state_dir(project_root).join("goal_loops.json")
 }
 
 pub(crate) async fn load_goal_loop_store(project_root: &Path) -> Result<GoalLoopStore, String> {
@@ -366,7 +688,7 @@ async fn load_goal_snapshot(
     project_root: &Path,
     goal_id: &str,
 ) -> Result<Option<crate::core::goal_tracking::Goal>, String> {
-    let path = project_root.join(".star").join("goals.json");
+    let path = crate::core::goal_tracking::persistence::project_goals_path(project_root);
     if !path.exists() {
         return Ok(None);
     }

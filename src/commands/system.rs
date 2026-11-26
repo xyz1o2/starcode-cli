@@ -225,6 +225,20 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
                 category: "Automation",
                 sub_commands: &[],
             },
+            SlashCommand {
+                name: "pause",
+                alt_names: &[],
+                description: "Pause future runs without interrupting the current turn",
+                category: "Automation",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "resume",
+                alt_names: &[],
+                description: "Resume a task after a full interval",
+                category: "Automation",
+                sub_commands: &[],
+            },
         ],
     },
     SlashCommand {
@@ -2305,7 +2319,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "goal",
         alt_names: &[],
-        description: "Set or view the current goal",
+        description: "Set or view the current goal (/goal --help)",
         category: "Automation",
         sub_commands: &[],
     },
@@ -2807,7 +2821,7 @@ pub fn command_argument_hint(input: &str) -> Option<String> {
                 "chat delete" => Some("<session>"),
                 "chat share" => Some("[name]"),
                 "loop add" => Some("<name> <minutes> <prompt...>"),
-                "loop remove" => Some("<name>"),
+                "loop remove" | "loop pause" | "loop resume" => Some("<name>"),
                 _ => None,
             };
             let detail = if path == "resume" || path == "chat resume" {
@@ -3162,6 +3176,8 @@ mod tests {
                 "/loop add - Run a prompt on a schedule",
                 "/loop list - Show tasks and next run times",
                 "/loop remove - Delete a task by name",
+                "/loop pause - Pause future runs without interrupting the current turn",
+                "/loop resume - Resume a task after a full interval",
             ]
         );
         let add_hint = command_argument_hint("/loop add").unwrap();

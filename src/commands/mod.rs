@@ -198,7 +198,7 @@ pub async fn handle_command(
         // /init 的帮助、预览、离线参数及补充要求由 topic module 统一校验。
         "init" => init::run(ctx, args).await,
         "plan" => plan::run(ctx, args).await,
-        "loop" => loop_wrapper(ctx, args).await,
+        "loop" => loop_cmd::run(ctx, args).await,
         "goal-loop" => goal_loop_wrapper(ctx, args).await,
         "agents" => {
             let args = system::default_subcommand_args("agents", args);
@@ -526,13 +526,6 @@ simple_command_wrapper!(
     "skills",
     crate::commands::skills::SkillsCommand,
     crate::commands::skills::execute_skills_command
-);
-
-simple_command_wrapper!(
-    loop_wrapper,
-    "loop",
-    crate::commands::loop_cmd::LoopCommand,
-    crate::commands::loop_cmd::execute_loop_command
 );
 
 simple_command_wrapper!(
