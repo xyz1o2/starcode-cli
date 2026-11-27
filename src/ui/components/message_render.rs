@@ -153,10 +153,17 @@ pub(crate) fn render_non_tool_entry_blocks(
 
                     if is_expanded {
                         // 展开态：头部（不重复展开提示）
-                        blocks.push(vec![Line::from(vec![
+                        let mut header = vec![Line::from(vec![
                             Span::styled("∴ ", label_style),
                             Span::styled(header_text, label_style),
-                        ])]);
+                        ])];
+                        super::chat_history::apply_expanded_block_background(
+                            &mut header,
+                            wrap_width.saturating_add(2),
+                            theme.thinking_bg,
+                            theme,
+                        );
+                        blocks.push(header);
 
                         // 内容：dim 色 + 缩进 2 列，逐行渲染不走 markdown 段落排版。
                         //
@@ -284,6 +291,12 @@ pub(crate) fn render_non_tool_entry_blocks(
                             ));
                             thinking_lines.push(Line::from(spans));
                         }
+                        super::chat_history::apply_expanded_block_background(
+                            &mut thinking_lines,
+                            wrap_width.saturating_add(2),
+                            theme.thinking_bg,
+                            theme,
+                        );
                         blocks.push(thinking_lines);
                     } else if !is_streaming_now && !cancelling {
                         // 折叠态 + 已完成：这一块唯一的形态 —— 一条记录。
@@ -899,7 +912,7 @@ mod tests {
     /// 且不在块首/块尾留下悬空行。
     #[test]
     fn thinking_lines_keep_paragraph_breaks_without_extra_padding() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = ChatState::test_fixture();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content =
             Some("先分析用户的问题\n\n拆解成三个子任务\n\n\n\n逐个检查边界情况\n\n".to_string());
@@ -919,6 +932,8 @@ mod tests {
             })
             .collect();
 
+        // 背板填充不属于正文；保留源缩进，只去掉右侧用于铺底的空格。
+        let rendered: Vec<_> = rendered.iter().map(|line| line.trim_end()).collect();
         // 三行各一行、段间恰好一个空行；连续空行折叠，尾部空行不留
         assert_eq!(
             rendered,
@@ -939,7 +954,7 @@ mod tests {
     /// 看不出哪里是断点，结构化思考内容会变成同一列的「面条文本」。
     #[test]
     fn thinking_lines_preserve_indentation_across_wrapping() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = ChatState::test_fixture();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("root\n  nested item\n    deeper value".to_string());
         state.chat_history.push(entry);
@@ -957,6 +972,7 @@ mod tests {
             })
             .collect();
 
+        let rendered: Vec<_> = rendered.iter().map(|line| line.trim_end()).collect();
         assert_eq!(
             rendered,
             vec![
@@ -980,7 +996,7 @@ mod tests {
     fn thinking_body_fills_the_given_width_on_wide_terminals() {
         let long = "word ".repeat(80);
         let render_at = |w: usize| -> Vec<(String, usize)> {
-            let mut state = crate::ui::state::ChatState::new();
+            let mut state = ChatState::test_fixture();
             let mut entry = crate::types::ChatEntry::assistant("");
             entry.reasoning_content = Some(format!("{}\n```\n{}\n```", long.trim(), long.trim()));
             state.chat_history.push(entry);
@@ -991,7 +1007,8 @@ mod tests {
                 .flatten()
                 .map(|l| {
                     let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                    let width = crate::ui::utils::render::line_spans_display_width(&l.spans);
+                    // 测量正文折行，不把额外两列背板留白算作内容。
+                    let width = crate::ui::utils::render::display_width(text.trim_end());
                     (text, width)
                 })
                 .collect()
@@ -1029,7 +1046,7 @@ mod tests {
     /// `##` 标题去标记后加粗，``` 围栏代码段要真正渲染（边框 + 高亮）。
     #[test]
     fn thinking_inline_markdown_renders_styled_not_literal() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = ChatState::test_fixture();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some(
             "## 分析重点\n先查 **缓存失效** 的问题\n再看 `retry` 逻辑\n```bash\necho hi\n```"
@@ -1051,7 +1068,7 @@ mod tests {
                 (text, has_bold)
             })
             .collect();
-        let texts: Vec<&str> = rendered.iter().map(|(t, _)| t.as_str()).collect();
+        let texts: Vec<&str> = rendered.iter().map(|(t, _)| t.trim_end()).collect();
 
         // 无任何字面 markdown 标记残留（围栏边框 ┌/└ 不是标记）
         for t in &texts {
@@ -1299,7 +1316,7 @@ mod tests {
     /// "Thought for 1s"（finalize 无时钟基准时的旧 bug）。
     #[test]
     fn restored_history_thinking_blocks_stay_visible_without_bogus_duration() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = ChatState::test_fixture();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("restored reasoning content here".to_string());
         // 模拟 serde 恢复：耗时尚未冻结
@@ -1410,7 +1427,7 @@ mod tests {
     /// 跑一会儿消失、重启读回后又出现"，用户无法预期。窗口已移除。
     #[test]
     fn completed_thinking_label_stays_visible_for_the_rest_of_the_session() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = ChatState::test_fixture();
         let mut entry = crate::types::ChatEntry::assistant("");
         entry.reasoning_content = Some("reasoning that outlives the old grace window".to_string());
         entry.reasoning_finished_elapsed_ms = Some(3_000);

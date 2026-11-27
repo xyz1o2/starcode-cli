@@ -904,11 +904,9 @@ fn check_dangerous_operators(
     if dangerous_ops.iter().any(|op| command.contains(op)) {
         return Some(crate::core::tools::tools::ToolCallConfirmationDetails {
             confirmation_type: crate::core::tools::tools::ConfirmationType::Warning,
-            title: "Complex Command".to_string(),
-            prompt: format!(
-                "The command contains shell operators/chaining. Review carefully: {}",
-                command
-            ),
+            title: crate::core::i18n::t1("ui.confirm.shell_operators.title"),
+            // 完整命令由结构化参数独立展示，提示只解释需要注意的操作类型。
+            prompt: crate::core::i18n::t1("ui.confirm.shell_operators.warning"),
             on_confirm: std::sync::Arc::new(|_, _feedback| {}),
         });
     }

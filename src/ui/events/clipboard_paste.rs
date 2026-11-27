@@ -360,6 +360,7 @@ mod tests {
             is_dangerous: false,
             outcome: None,
             reason: None,
+            presentation: Default::default(),
         });
         let idx = state.chat_history.len();
         state.chat_history.push(entry);

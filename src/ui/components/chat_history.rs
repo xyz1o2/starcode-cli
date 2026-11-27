@@ -585,6 +585,38 @@ fn entry_leading_blank_rows(entries: &[crate::types::ChatEntry], entry_idx: usiz
     }
 }
 
+/// 为展开详情补齐整行背板；真实写屏路径只读取 span，不继承 Line 的背景。
+///
+/// 专用背景为透明时复用主题 surface；只补背景，不改文字、状态色和 diff 高亮。
+/// 空行也生成有样式的空格，保证缩进、折行及右侧留白不会露出页面底色。
+pub(crate) fn apply_expanded_block_background(
+    lines: &mut [Line<'static>],
+    width: usize,
+    background: Color,
+    theme: &crate::ui::themes::theme::Theme,
+) {
+    let background = if background == Color::Reset {
+        theme.user_message_bg
+    } else {
+        background
+    };
+    for line in lines {
+        line.style = line.style.bg(background);
+        for span in &mut line.spans {
+            if matches!(span.style.bg, None | Some(Color::Reset)) {
+                span.style = span.style.bg(background);
+            }
+        }
+        let padding = width.saturating_sub(line.width());
+        if padding > 0 {
+            line.spans.push(Span::styled(
+                " ".repeat(padding),
+                Style::default().bg(background),
+            ));
+        }
+    }
+}
+
 /// 渲染单个条目的完整行序列。`pub(crate)`：`store::get_selected_text` 在
 /// rendered_cache 缺失时用它兜底重渲染，否则复制会静默失败。
 pub(crate) fn render_entry_lines(
@@ -711,6 +743,173 @@ pub(crate) fn render_entry_lines(
 mod teammate_view_tests {
     use super::*;
 
+    fn expanded_backdrop_fixture() -> ChatState {
+        use crate::types::{
+            ChatEntry, EntryStatus, StarToolCall, StarToolCallFunction, ToolResult,
+        };
+        let mut state = ChatState::test_fixture();
+        let call = StarToolCall {
+            id: "backdrop-tool".into(),
+            call_type: "function".into(),
+            function: StarToolCallFunction {
+                name: "Bash".into(),
+                arguments: r#"{"command":"cargo check"}"#.into(),
+            },
+        };
+        let mut header = ChatEntry::tool_call("", call.clone());
+        header.status = Some(EntryStatus::Success);
+        header.is_streaming = Some(false);
+        let result = ChatEntry::tool_result(
+            "",
+            call,
+            ToolResult {
+                success: true,
+                output: Some(
+                    "A long tool output line that wraps across narrow screens 中\n\nDone".into(),
+                ),
+                error: None,
+                data: None,
+                llm_content: None,
+            },
+        );
+        let mut assistant = ChatEntry::new(ChatEntryType::Assistant, "Plain reply".into());
+        assistant.reasoning_content = Some(
+            "**Review** the tool output carefully across wrapped lines 中\n\n```rust\nlet ready = true;\n```".into(),
+        );
+        assistant.reasoning_finished_elapsed_ms = Some(1200);
+        state.chat_history = vec![header, result, assistant];
+        state.expanded_tool_call_ids.insert("backdrop-tool".into());
+        state.expanded_thinking_indices.insert(2);
+        state
+    }
+
+    #[test]
+    fn expanded_backdrop_preserves_foreground_modifiers_and_diff_backgrounds() {
+        let theme = crate::ui::themes::theme::Theme::default_dark();
+        let original = Style::default()
+            .fg(theme.tool_error)
+            .add_modifier(Modifier::BOLD);
+        let diff = Style::default().fg(theme.success).bg(theme.diff_added);
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("error", original),
+                Span::styled("+", diff),
+                Span::styled("!", original.bg(Color::Reset)),
+            ]),
+            Line::from(""),
+        ];
+        apply_expanded_block_background(&mut lines, 12, theme.tool_bg, &theme);
+        assert_eq!(lines[0].spans[0].style, original.bg(theme.user_message_bg));
+        assert_eq!(lines[0].spans[1].style, diff);
+        assert_eq!(lines[0].spans[2].style, original.bg(theme.user_message_bg));
+        assert!(lines.iter().all(|line| line.width() == 12));
+        let mut custom = vec![Line::from("custom")];
+        apply_expanded_block_background(&mut custom, 12, theme.code_bg, &theme);
+        assert_eq!(custom[0].style.bg, Some(theme.code_bg));
+        assert!(custom[0]
+            .spans
+            .iter()
+            .all(|span| span.style.bg == Some(theme.code_bg)));
+    }
+
+    /// 走真实文档与逐格写屏链路，覆盖全部主题、窄屏、空行、宽字符及滚动裁切。
+    #[test]
+    fn expanded_backdrop_fills_live_chat_without_tinting_headers_or_plain_text() {
+        let mut state = expanded_backdrop_fixture();
+        let themes: Vec<_> = state
+            .theme_manager
+            .list_themes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for name in themes {
+            assert!(state.theme_manager.set_theme(&name));
+            for width in [16, 44, 96] {
+                state.clear_cache();
+                let lines = render_chat_lines(&mut state, width);
+                let theme = state.theme_manager.current();
+                let tool_bg = if theme.tool_bg == Color::Reset {
+                    theme.user_message_bg
+                } else {
+                    theme.tool_bg
+                };
+                let thinking_bg = if theme.thinking_bg == Color::Reset {
+                    theme.user_message_bg
+                } else {
+                    theme.thinking_bg
+                };
+                assert_ne!(tool_bg, theme.background, "{name}");
+                assert_ne!(thinking_bg, theme.background, "{name}");
+                let thinking_start: usize = state.last_item_heights[..2]
+                    .iter()
+                    .map(|height| usize::from(*height))
+                    .sum();
+                let mut tool_rows = 0;
+                let mut thinking_rows = 0;
+                let mut blank_rows = 0;
+                for (row, line) in lines.iter().enumerate() {
+                    let area = Rect::new(1, 1, width, 1);
+                    let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, width + 2, 3));
+                    crate::ui::utils::render::write_lines_to_buffer(&mut buf, area, &lines, row);
+                    if let Some(bg) = line.style.bg {
+                        let expected = if row < thinking_start {
+                            tool_bg
+                        } else {
+                            thinking_bg
+                        };
+                        assert_eq!(bg, expected);
+                        assert!(line.width() >= width as usize);
+                        for x in area.x..area.right() {
+                            assert_eq!(
+                                buf[(x, 1)].bg,
+                                bg,
+                                "{name}, width={width}, row={row}, x={x}"
+                            );
+                        }
+                        tool_rows += usize::from(row < thinking_start);
+                        thinking_rows += usize::from(row >= thinking_start);
+                        blank_rows += usize::from(
+                            line.spans.iter().all(|span| span.content.trim().is_empty()),
+                        );
+                    } else {
+                        assert_eq!(buf[(width, 1)].bg, Color::Reset);
+                    }
+                    assert_eq!(buf[(width + 1, 1)].bg, Color::Reset, "scrollbar column");
+                }
+                assert!(tool_rows >= 3 && thinking_rows >= 4 && blank_rows >= 2);
+                assert_eq!(lines[0].style.bg, None, "tool title");
+                assert_eq!(lines.last().unwrap().style.bg, None, "plain reply");
+            }
+        }
+        assert!(state.theme_manager.set_theme("dark"));
+    }
+
+    #[test]
+    fn collapsed_backdrop_removes_panels_and_keeps_plain_chat_unpainted() {
+        let mut state = expanded_backdrop_fixture();
+        let expanded = render_chat_lines(&mut state, 44);
+        assert!(expanded.iter().any(|line| line.style.bg.is_some()));
+        state.toggle_tool_expansion(0);
+        state.toggle_thinking_expansion(2);
+        let collapsed = render_chat_lines(&mut state, 44);
+        assert!(collapsed.iter().all(|line| line.style.bg.is_none()));
+        assert!(collapsed
+            .iter()
+            .flat_map(|line| &line.spans)
+            .all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn snapshot_expanded_chat_backdrops() {
+        let mut state = expanded_backdrop_fixture();
+        assert!(state.theme_manager.set_theme("dark"));
+        let lines = render_chat_lines(&mut state, 44);
+        crate::ui::test_support::assert_render!("expanded_chat_backdrops", 44, 18, |f| {
+            let area = f.area();
+            crate::ui::utils::render::write_lines_to_buffer(f.buffer_mut(), area, &lines, 0);
+        });
+    }
+
     /// 不同长度、是否有折叠提示，都不能改变相邻工具块之间的一行分隔。
     #[test]
     fn tool_calls_start_new_blocks_while_confirmations_and_results_stay_attached() {
@@ -752,6 +951,7 @@ mod teammate_view_tests {
             is_dangerous: false,
             outcome: Some(crate::core::i18n::t1("ui.confirm.outcome.once")),
             reason: None,
+            presentation: Default::default(),
         });
         state.chat_history = vec![
             ChatEntry::new(ChatEntryType::Assistant, "Ready".into()),

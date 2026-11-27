@@ -77,6 +77,9 @@ pub struct ToolConfirmationRequest {
     /// 拦截来自哪一层，「有时候要同意有时候不用」的困惑才有着落。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// 仅用于确认卡排版的来源信息；不影响总线复查和用户裁决。
+    #[serde(default)]
+    pub presentation: crate::types::ConfirmationPresentation,
     /// 发起这次确认的**模型侧** tool_call id。
     ///
     /// `correlation_id` 是 bus 生成的 UUID，只有等答复的那一方认它；UI 拿到

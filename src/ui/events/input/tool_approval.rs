@@ -335,6 +335,7 @@ mod approval_regressions {
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             },
         }
     }

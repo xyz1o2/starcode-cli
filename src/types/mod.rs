@@ -1326,6 +1326,17 @@ impl ThinkingEffort {
 }
 
 // ============ UX 改进: 工具确认相关类型 ============
+/// 确认卡的展示来源；不参与权限判定，也不改变授权范围。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfirmationPresentation {
+    /// 自动审批转为人工确认，原始诊断仍保存在 `reason` 中供展开查看。
+    #[serde(default)]
+    pub auto_fallback: bool,
+    /// 工具自身的安全提示，独立于命令展示，不能被自动审批诊断覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_warning: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfirmation {
     pub tool_name: String,
@@ -1338,9 +1349,12 @@ pub struct ToolConfirmation {
     /// 的困惑：用户看得出这次拦截来自哪一层，才不会把几种弹框混成一个谜。
     ///
     /// 由 `pass_gate` 按 `card_source` 填人话，`confirmation_bridge` 透传；
-    /// `None` = 工具自带确认卡（它自己的 prompt 已经解释过了）。
+    /// 工具警告可与 Auto 回退原因并存；`None` 表示没有额外的权限层说明。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// 老会话没有展示元数据时保留原始原因，不靠本地化文案推断来源。
+    #[serde(default)]
+    pub presentation: ConfirmationPresentation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

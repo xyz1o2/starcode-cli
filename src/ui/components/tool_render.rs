@@ -320,6 +320,14 @@ pub(crate) fn render_tool_entry_blocks(
             boxed_lines.pop();
         }
     }
+    if is_tool_result && expanded {
+        super::chat_history::apply_expanded_block_background(
+            &mut boxed_lines,
+            tool_box_width,
+            theme.tool_bg,
+            theme,
+        );
+    }
     if !boxed_lines.is_empty() {
         blocks.push(boxed_lines);
     }
@@ -2088,7 +2096,9 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
+        let texts: Vec<_> = texts.iter().map(|line| line.trim_end()).collect();
         assert_eq!(texts, ["  ⎿  first", "", "     second"]);
+        assert!(lines.iter().all(|line| line.width() == 72));
     }
 
     #[test]

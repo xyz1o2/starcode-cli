@@ -2063,6 +2063,7 @@ async fn confirmation_feedback_draft_resets_for_new_request_and_matching_result(
         is_dangerous: false,
         outcome: None,
         reason: None,
+        presentation: Default::default(),
     };
 
     handle_stream_update(
@@ -2579,6 +2580,7 @@ async fn approved_multi_edit_history_shows_target_without_once_receipt() {
                 is_dangerous: true,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             },
         },
         &tx,
@@ -2634,6 +2636,7 @@ fn shell_confirmation(command: &str) -> crate::types::ToolConfirmation {
         is_dangerous: true,
         outcome: None,
         reason: None,
+        presentation: Default::default(),
     }
 }
 

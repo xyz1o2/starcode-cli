@@ -293,12 +293,11 @@ fn message_confirmation_details(
 fn auto_confirmation_details(
     tool_name: &str,
     args: &serde_json::Value,
-    reason: &str,
 ) -> crate::core::tools::tools::ToolCallConfirmationDetails {
     let mut details = default_confirmation_details(tool_name, args);
     details.prompt = format!(
         "{}{}",
-        crate::core::i18n::t1("ui.confirm.auto_reason").replace("{reason}", reason),
+        crate::core::i18n::t1("ui.confirm.auto_fallback"),
         confirmation_summary(tool_name, args)
     );
     details
@@ -801,8 +800,8 @@ impl ToolExecutor {
             args,
             if policy_requires_confirmation {
                 policy_confirmation_details(tool_name, args)
-            } else if let Some(reason) = auto_ask_reason.as_deref() {
-                auto_confirmation_details(tool_name, args, reason)
+            } else if auto_ask_reason.is_some() {
+                auto_confirmation_details(tool_name, args)
             } else {
                 default_confirmation_details(tool_name, args)
             },
@@ -837,6 +836,10 @@ impl ToolExecutor {
             server_name: None,
             title: Some(details.title),
             prompt: Some(details.prompt),
+            presentation: crate::types::ConfirmationPresentation {
+                auto_fallback: auto_ask_reason.is_some(),
+                tool_warning: None,
+            },
             reason: auto_ask_reason
                 .map(|reason| {
                     crate::core::i18n::t1("ui.confirm.auto_reason").replace("{reason}", &reason)
@@ -1151,9 +1154,9 @@ impl ToolExecutor {
                 } else if policy_requires_confirmation {
                     card_source = "ask_rule";
                     policy_confirmation_details(tool_name, args)
-                } else if let Some(reason) = auto_ask_reason.as_deref() {
+                } else if auto_ask_reason.is_some() {
                     card_source = "auto_fallback";
-                    auto_confirmation_details(tool_name, args, reason)
+                    auto_confirmation_details(tool_name, args)
                 } else {
                     card_source = "fallback_default";
                     default_confirmation_details(tool_name, args)
@@ -1209,6 +1212,11 @@ impl ToolExecutor {
             correlation_id: String::new(),
             server_name: None,
             title: Some(details.title),
+            presentation: crate::types::ConfirmationPresentation {
+                auto_fallback: auto_ask_reason.is_some()
+                    && build_prompt_reason(card_source, requires_prompt, sensitive_hit).is_none(),
+                tool_warning: (card_source == "tool").then(|| details.prompt.clone()),
+            },
             prompt: Some(details.prompt),
             // 「这次为什么要问」——来源在下面填。工具自带的卡（source=tool）
             // 自己的 prompt 已经解释过了，不再重复一行。
@@ -5265,6 +5273,8 @@ mod tests {
                                 "unexpected approval reason: {:?}",
                                 request.reason,
                             );
+                            assert!(request.presentation.auto_fallback);
+                            assert!(!request.prompt.as_deref().unwrap().contains("timed out"));
                             assert!(!request.prompt.as_deref().unwrap().contains("No allow rule"));
                             correlation_id = Some(request.correlation_id.clone());
                             response_bus

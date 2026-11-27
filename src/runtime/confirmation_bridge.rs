@@ -3,6 +3,9 @@ use crate::core::i18n;
 use crate::runtime::messages::StreamMessage;
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+mod tests;
+
 pub async fn relay_confirmation_bus_message(
     tx: &mpsc::Sender<StreamMessage>,
     message_id: u64,
@@ -32,7 +35,21 @@ pub async fn relay_confirmation_bus_message(
                 .await
             };
 
-            if !matches!(
+            // Bash 的动作参数已经结构化，不能被说明段落覆盖成 Generic。
+            let is_bash =
+                crate::core::tools::constants::resolve_registered_tool_name(&req.tool_call.name)
+                    == "Bash";
+            confirmation.presentation = req.presentation.clone();
+            if is_bash {
+                // 兼容旧请求：没有展示元数据时仍完整保留原工具提示，不能吞掉安全信息。
+                if confirmation.presentation.tool_warning.is_none()
+                    && !confirmation.presentation.auto_fallback
+                    && req.reason.is_none()
+                {
+                    confirmation.presentation.tool_warning =
+                        req.prompt.clone().or(req.title.clone());
+                }
+            } else if !matches!(
                 confirmation.operation_type,
                 crate::types::ConfirmationType::AskUserQuestion
             ) {
@@ -69,8 +86,7 @@ pub async fn relay_confirmation_bus_message(
             }
 
             confirmation.tool_name = req.tool_call.name.clone();
-            // 「这次为什么要问」的一行说明 —— 由 pass_gate 按卡片来源填，
-            // 只透传不加工。工具自带的卡为 None（它自己的 prompt 已解释）。
+            // 权限层原因原样保留，Auto 诊断是否折叠只由展示元数据决定。
             confirmation.reason = req.reason.clone();
             let _ = tx
                 .send(StreamMessage::ToolConfirmationRequest {
@@ -190,6 +206,7 @@ fn build_ask_user_question_confirmation(
         is_dangerous: false,
         outcome: None,
         reason: None,
+        presentation: Default::default(),
     }
 }
 

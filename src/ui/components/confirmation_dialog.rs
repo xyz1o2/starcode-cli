@@ -487,18 +487,35 @@ pub fn build_confirmation_card_block(
         }
     }
 
-    // 自动审批的实现诊断收进详情；显式 ask、敏感路径等原因仍原样可见。
-    if let Some(reason) = confirmation.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let template = i18n::t1("ui.confirm.auto_reason");
-        let is_auto_fallback = template
-            .split_once("{reason}")
-            .is_some_and(|(prefix, _)| !prefix.is_empty() && reason.starts_with(prefix));
-        let summary = if is_auto_fallback {
+    // 工具警告与自动审批原因可以同时存在，安全提示默认可见而非藏到详情。
+    if matches!(confirmation.operation_type, ConfirmationType::ShellCommand) {
+        if let Some(warning) = confirmation.presentation.tool_warning.as_deref() {
+            for wrapped in
+                crate::ui::utils::text::wrap_detail(warning, wrap_width.saturating_sub(2).max(1))
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("  {wrapped}"),
+                    Style::default().fg(theme.warning),
+                )));
+            }
+        }
+    }
+
+    // 来源通过展示元数据传递，不解析中英文诊断；显式 ask、敏感路径仍原样可见。
+    if let Some(reason) = confirmation
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let summary = if confirmation.presentation.auto_fallback {
             i18n::t1("ui.confirm.auto_fallback")
         } else {
             reason.to_string()
         };
-        for wrapped in crate::ui::utils::text::wrap_detail(&summary, wrap_width.saturating_sub(2).max(1)) {
+        for wrapped in
+            crate::ui::utils::text::wrap_detail(&summary, wrap_width.saturating_sub(2).max(1))
+        {
             lines.push(Line::from(Span::styled(
                 format!("  {wrapped}"),
                 Style::default().fg(palette.secondary),
@@ -598,8 +615,14 @@ pub fn build_confirmation_card_block(
     // ── Explanation section (Ctrl+E) ──
     if show_explanation {
         lines.push(Line::from(""));
-        if let Some(reason) = confirmation.reason.as_deref().filter(|s| !s.trim().is_empty()) {
-            for wrapped in crate::ui::utils::text::wrap_detail(reason, wrap_width.saturating_sub(2).max(1)) {
+        if let Some(reason) = confirmation
+            .reason
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            for wrapped in
+                crate::ui::utils::text::wrap_detail(reason, wrap_width.saturating_sub(2).max(1))
+            {
                 lines.push(Line::from(Span::styled(
                     format!("  {wrapped}"),
                     Style::default().fg(palette.secondary),
@@ -621,10 +644,14 @@ pub fn build_confirmation_card_block(
             ConfirmationDetails::NetworkRequest { .. } => i18n::t1("ui.confirm.explain.network"),
             _ => i18n::t1("ui.confirm.explain.generic"),
         };
-        lines.push(Line::from(Span::styled(
-            explanation.to_string(),
-            Style::default().fg(palette.secondary),
-        )));
+        for wrapped in
+            crate::ui::utils::text::wrap_detail(&explanation, wrap_width.saturating_sub(2).max(1))
+        {
+            lines.push(Line::from(Span::styled(
+                format!("  {wrapped}"),
+                Style::default().fg(palette.secondary),
+            )));
+        }
     }
 
     // ── Debug section (Ctrl+D): 工具入参 JSON ──
@@ -658,10 +685,15 @@ pub fn build_confirmation_card_block(
     // 反馈默认隐藏后，按键提示也裁掉 Feedback —— Tab 仍然可用，
     // 但一行提示里排五个动作已经超出扫视体验，低频动作交给 Ctrl+E 解释。
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        i18n::t1("ui.confirm.hint.key_guide"),
-        Style::default().fg(palette.faint),
-    )));
+    for wrapped in crate::ui::utils::text::wrap_detail(
+        i18n::t1("ui.confirm.hint.key_guide").trim(),
+        wrap_width.saturating_sub(2).max(1),
+    ) {
+        lines.push(Line::from(Span::styled(
+            format!("  {wrapped}"),
+            Style::default().fg(palette.faint),
+        )));
+    }
 
     lines
 }
@@ -1003,6 +1035,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "Edit" => {
@@ -1027,6 +1060,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "SmartEdit" => {
@@ -1051,6 +1085,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "save_memory" => {
@@ -1115,6 +1150,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "Bash" | "shell" => {
@@ -1170,6 +1206,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "Write" => {
@@ -1196,6 +1233,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         "Read" => {
@@ -1238,6 +1276,7 @@ pub async fn build_confirmation_from_tool_call(
                 is_dangerous: false,
                 outcome: None,
                 reason: None,
+                presentation: Default::default(),
             }
         }
         _ => crate::types::ToolConfirmation {
@@ -1259,6 +1298,7 @@ pub async fn build_confirmation_from_tool_call(
             is_dangerous: false,
             outcome: None,
             reason: None,
+            presentation: Default::default(),
         },
     }
 }
@@ -1276,6 +1316,7 @@ mod tests {
             is_dangerous: false,
             outcome: None,
             reason: None,
+            presentation: Default::default(),
         }
     }
 
@@ -1585,6 +1626,40 @@ mod tests {
             with.contains("ask` for this tool") || with.contains("ask\" for this tool"),
             "reason 出现时必须渲染出原文：{with}"
         );
+    }
+
+    /// 高风险与严重风险必须保留清晰文字和告警颜色，不能依赖形状符号。
+    #[test]
+    fn dangerous_shell_risks_remain_visible_without_symbols() {
+        let theme = test_theme();
+        for risk in [RiskLevel::High, RiskLevel::Critical] {
+            let confirmation = conf(
+                ConfirmationType::ShellCommand,
+                ConfirmationDetails::ShellCommand {
+                    command: "review-target".into(),
+                    working_dir: ".".into(),
+                    estimated_risk: risk.clone(),
+                    diff_preview: None,
+                },
+            );
+            let lines = build_confirmation_card_block(
+                &confirmation,
+                44,
+                1,
+                false,
+                false,
+                false,
+                "",
+                &theme,
+            );
+            let label = format!("{}{}", i18n::t1("ui.confirm.label.risk"), risk_label(&risk));
+            let risk_line = lines
+                .iter()
+                .find(|line| crate::ui::utils::text::line_plain_text(line) == label)
+                .expect("risk warning remains visible");
+            assert_eq!(risk_line.spans[0].style.fg, Some(theme.error));
+            assert!(!label.contains(['✓', '○', '△', '▲', '⚠']));
+        }
     }
 
     /// 测试用主题 —— `ThemeManager::new()` 是纯构造（13 套硬编码预设），无需固定。

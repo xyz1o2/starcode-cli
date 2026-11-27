@@ -539,6 +539,7 @@ mod tests {
                 title: None,
                 prompt: None,
                 reason: None,
+                presentation: Default::default(),
                 originating_tool_call_id: None,
             };
             let wire = serde_json::to_value(&request).unwrap();

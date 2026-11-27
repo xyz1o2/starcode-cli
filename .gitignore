@@ -24,12 +24,5 @@ logs/
 .image/
 .claude/
 *.snap
-!tests/snapshots/ui/spinner_explicit_phase.snap
-!tests/snapshots/ui/resume_argument_help.snap
-!tests/snapshots/ui/dynamic_plugin_completion.snap
-!tests/snapshots/ui/agent_selector_viewing.snap
-!tests/snapshots/ui/approved_bash_failure.snap
-!tests/snapshots/ui/approved_multi_edit_targets.snap
-!tests/snapshots/ui/tool_status_dots.snap
-!tests/snapshots/ui/tool_transcript_spacing.snap
+*.snap
 skills-lock.json
