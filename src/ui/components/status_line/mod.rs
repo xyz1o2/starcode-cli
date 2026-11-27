@@ -860,8 +860,10 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 最亮的东西既不是动词也不是时钟，而是一个 trivia。
     let meta_color = text_color(theme.secondary, stall);
 
+    let spinner_prefix = format!(" {} ", spinner);
+    let status_indent_width = spinner_prefix.width();
     let mut spans = vec![Span::styled(
-        format!(" {} ", spinner),
+        spinner_prefix,
         Style::default().fg(spinner_color),
     )];
 
@@ -967,10 +969,24 @@ pub fn processing_spinner_line(state: &ChatState, width: u16) -> Vec<ratatui::te
     // 对标 Claude Code：spinner 行只显示动词 + 耗时，不显示模型名。
     // 模型名由底部状态栏（build_status_spans 的 "⊙ model"）负责展示。
 
-    vec![
-        ratatui::text::Line::from(""),
-        ratatui::text::Line::from(spans),
-    ]
+    // 复用固定留白行，正文与 spinner 的动词对齐；缩进也计入窄屏宽度预算。
+    let retry_line = state
+        .active_retry_status
+        .as_deref()
+        .filter(|_| !state.is_awaiting_confirmation && state.cancelling_since.is_none())
+        .map(|status| {
+            let indent_width = status_indent_width.min(width as usize);
+            let text = crate::ui::utils::render::truncate_to_display_width(
+                status,
+                (width as usize).saturating_sub(indent_width),
+            );
+            Line::from(Span::styled(
+                format!("{}{text}", " ".repeat(indent_width)),
+                Style::default().fg(theme.warning),
+            ))
+        })
+        .unwrap_or_else(|| Line::from(""));
+    vec![retry_line, ratatui::text::Line::from(spans)]
 }
 
 /// Render a token usage warning line above the input area.

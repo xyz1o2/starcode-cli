@@ -1117,6 +1117,30 @@ mod tests {
         );
     }
 
+    /// 新工具块前的分隔行不能响应点击，实际标题仍能命中正确的调用。
+    #[test]
+    fn adjacent_tool_separator_and_header_have_distinct_click_targets() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history = vec![
+            tool_call_entry("first", "Read"),
+            tool_result_entry("first", "Read", "line A"),
+            tool_call_entry("second", "Bash"),
+            tool_result_entry("second", "Bash", "done"),
+        ];
+        state.last_chat_area = Some(Rect::new(0, 0, 80, 24));
+        let lines = render(&mut state);
+        let header = row_containing(&lines, "bash");
+        assert!(lines[header - 1]
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty()));
+        click_at(&mut state, (header - 1) as u16);
+        assert!(state.expanded_tool_call_ids.is_empty());
+        click_at(&mut state, header as u16);
+        assert!(state.expanded_tool_call_ids.contains("second"));
+        assert!(!state.expanded_tool_call_ids.contains("first"));
+    }
+
     /// 回归：点**看得见的工具名**那一行能展开。
     ///
     /// 旧实现判的是「entry 的第 0 行」——工具头 entry 渲染出来是

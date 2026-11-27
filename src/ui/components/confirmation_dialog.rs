@@ -47,21 +47,13 @@ impl ConfirmPalette {
 }
 
 fn risk_label(risk: &crate::types::RiskLevel) -> String {
-    let shape = match risk {
-        crate::types::RiskLevel::Safe => "✓",
-        crate::types::RiskLevel::Low => "○",
-        crate::types::RiskLevel::Medium => "△",
-        crate::types::RiskLevel::High => "▲",
-        crate::types::RiskLevel::Critical => "⚠",
-    };
-    let text = match risk {
+    match risk {
         crate::types::RiskLevel::Safe => i18n::t1("ui.confirm.risk.safe"),
         crate::types::RiskLevel::Low => i18n::t1("ui.confirm.risk.low"),
         crate::types::RiskLevel::Medium => i18n::t1("ui.confirm.risk.medium"),
         crate::types::RiskLevel::High => i18n::t1("ui.confirm.risk.high"),
         crate::types::RiskLevel::Critical => i18n::t1("ui.confirm.risk.critical"),
-    };
-    format!("{} {}", shape, text)
+    }
 }
 
 fn risk_color(risk: &crate::types::RiskLevel, palette: &ConfirmPalette) -> Color {
@@ -256,8 +248,11 @@ pub fn build_confirmation_card_block(
     use crate::types::{ConfirmationDetails, ConfirmationType};
     let palette = ConfirmPalette::of(theme);
 
-    // If already resolved, show outcome (Claude Code style: compact single line)
+    // 单次放行不再额外回执；保留裁决状态，且不吞掉附有反馈或保存失败的结果。
     if let Some(outcome) = &confirmation.outcome {
+        if outcome == "Allowed (once)" || outcome == &i18n::t1("ui.confirm.outcome.once") {
+            return Vec::new();
+        }
         let (color, icon) = outcome_style(outcome, &palette);
         let detail = match &confirmation.details {
             ConfirmationDetails::EditFile { file_path, .. } => format_display_path(file_path),
@@ -332,7 +327,7 @@ pub fn build_confirmation_card_block(
         ConfirmationType::ShellCommand => i18n::t1("ui.confirm.title.bash"),
         ConfirmationType::CreateFile => i18n::t1("ui.confirm.title.create_file"),
         ConfirmationType::AskUserQuestion => "Question".to_string(), // rendered by build_ask_user_question_card
-        _ => i18n::t1("ui.confirm.title.tool_use"),
+        _ => i18n::t1("ui.confirm.title.tool_use").replace("{tool}", &confirmation.tool_name),
     };
     lines.push(Line::from(Span::styled(
         title,
@@ -341,31 +336,8 @@ pub fn build_confirmation_card_block(
             .add_modifier(Modifier::BOLD),
     )));
 
-    // ── Separator ──
-    let sep = "─".repeat(wrap_width.saturating_sub(2));
-    lines.push(Line::from(Span::styled(
-        sep,
-        Style::default().fg(palette.faint),
-    )));
-
-    // ── Why asked (reason) ──
-    //
-    // 「这次为什么要问」的一行说明：ask 规则 / 敏感文件 / 兜底保守询问 三种
-    // 弹框在这里分得开 —— 用户头一次能看出这次拦截来自哪一层，而不是把所有
-    // 弹框混成一个「时而问时而不问」的谜。放 `risk` 行之前，先读原因再读风险。
-    if let Some(reason) = &confirmation.reason {
-        if !reason.trim().is_empty() {
-            for wrapped in crate::ui::utils::text::wrap_detail(
-                &format!("⚡ {}", reason.trim()),
-                wrap_width.saturating_sub(2).max(1),
-            ) {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", wrapped),
-                    Style::default().fg(palette.accent),
-                )));
-            }
-        }
-    }
+    // 先展示动作，再说明为什么需要确认；不让内部诊断抢占命令的位置。
+    lines.push(Line::from(""));
 
     // ── Content (command/file with description) ──
     match &confirmation.operation_type {
@@ -400,11 +372,23 @@ pub fn build_confirmation_card_block(
                 ..
             } = &confirmation.details
             {
-                let preview = truncate_str(command, wrap_width.saturating_sub(6) as usize);
-                lines.push(Line::from(vec![
-                    Span::styled("  $ ", Style::default().fg(palette.success)),
-                    Span::styled(preview, Style::default().fg(theme.foreground)),
-                ]));
+                // 审批前完整展示命令，不能截掉末尾的管道、重定向或后续动作。
+                for (index, wrapped) in crate::ui::utils::text::wrap_detail(
+                    command,
+                    wrap_width.saturating_sub(4).max(1),
+                )
+                .into_iter()
+                .enumerate()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if index == 0 { "  $ " } else { "    " },
+                            Style::default().fg(palette.secondary),
+                        ),
+                        Span::styled(wrapped, Style::default().fg(theme.foreground)),
+                    ]));
+                }
+                lines.push(Line::from(""));
                 lines.push(Line::from(vec![Span::styled(
                     format!(
                         "{}{}",
@@ -503,9 +487,27 @@ pub fn build_confirmation_card_block(
         }
     }
 
-    // ── Question ──
-    //
-    // 不再前置空行；问题行与选项紧挨着标题块，卡片高度省 1-2 行。
+    // 自动审批的实现诊断收进详情；显式 ask、敏感路径等原因仍原样可见。
+    if let Some(reason) = confirmation.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let template = i18n::t1("ui.confirm.auto_reason");
+        let is_auto_fallback = template
+            .split_once("{reason}")
+            .is_some_and(|(prefix, _)| !prefix.is_empty() && reason.starts_with(prefix));
+        let summary = if is_auto_fallback {
+            i18n::t1("ui.confirm.auto_fallback")
+        } else {
+            reason.to_string()
+        };
+        for wrapped in crate::ui::utils::text::wrap_detail(&summary, wrap_width.saturating_sub(2).max(1)) {
+            lines.push(Line::from(Span::styled(
+                format!("  {wrapped}"),
+                Style::default().fg(palette.secondary),
+            )));
+        }
+    }
+
+    // 授权选择与动作、原因分区，避免连续段落淹没操作入口。
+    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         i18n::t1("ui.confirm.question.proceed"),
         Style::default().fg(theme.foreground),
@@ -596,6 +598,14 @@ pub fn build_confirmation_card_block(
     // ── Explanation section (Ctrl+E) ──
     if show_explanation {
         lines.push(Line::from(""));
+        if let Some(reason) = confirmation.reason.as_deref().filter(|s| !s.trim().is_empty()) {
+            for wrapped in crate::ui::utils::text::wrap_detail(reason, wrap_width.saturating_sub(2).max(1)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {wrapped}"),
+                    Style::default().fg(palette.secondary),
+                )));
+            }
+        }
         lines.push(Line::from(Span::styled(
             i18n::t1("ui.confirm.explain.title"),
             Style::default()
@@ -1269,6 +1279,52 @@ mod tests {
         }
     }
 
+    /// 只隐藏无附加信息的单次放行，不能吞掉授权范围、拒绝或持久化失败。
+    #[test]
+    fn once_receipt_is_hidden_but_meaningful_outcomes_remain() {
+        let mut confirmation = conf(
+            ConfirmationType::Generic,
+            ConfirmationDetails::Generic {
+                title: "Edit".into(),
+                prompt: "Update src/main.rs".into(),
+            },
+        );
+        let theme = test_theme();
+        let render = |confirmation: &ToolConfirmation| {
+            build_confirmation_card_block(confirmation, 80, 1, false, false, false, "", &theme)
+        };
+        let pending_text = render(&confirmation)
+            .iter()
+            .map(crate::ui::utils::text::line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pending_text.contains(&i18n::t1("ui.confirm.option.once")));
+        for outcome in [
+            "Allowed (once)".to_string(),
+            i18n::t1("ui.confirm.outcome.once"),
+        ] {
+            confirmation.outcome = Some(outcome);
+            assert!(render(&confirmation).is_empty());
+        }
+        for outcome in [
+            i18n::t1("ui.confirm.outcome.session"),
+            i18n::t1("ui.confirm.outcome.always"),
+            i18n::t1("ui.confirm.outcome.persisting"),
+            i18n::t1("ui.confirm.outcome.persisted"),
+            i18n::t1("ui.confirm.outcome.persist_failed").replace("{error}", "disk is read-only"),
+            "Rejected".into(),
+            "Cancelled".into(),
+            "Allowed (once) · user feedback".into(),
+        ] {
+            confirmation.outcome = Some(outcome.clone());
+            let lines = render(&confirmation);
+            assert_eq!(lines.len(), 1, "{outcome}");
+            let text = crate::ui::utils::text::line_plain_text(&lines[0]);
+            let expected = outcome.replace("Allowed (once)", &i18n::t1("ui.confirm.outcome.once"));
+            assert!(text.contains(&expected), "{text}");
+        }
+    }
+
     /// Bash 卡片的风险来自 `estimate_bash_risk`，这里锚定两端：
     /// `rm -rf /` 必须是 Critical，纯读命令不能被报成高风险。
     #[test]
@@ -1533,6 +1589,7 @@ mod tests {
 
     /// 测试用主题 —— `ThemeManager::new()` 是纯构造（13 套硬编码预设），无需固定。
     fn test_theme() -> crate::ui::themes::Theme {
+        crate::core::i18n::reset_for_tests();
         crate::ui::themes::ThemeManager::new().current().clone()
     }
 }

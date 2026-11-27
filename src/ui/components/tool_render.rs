@@ -12,43 +12,27 @@ pub(crate) fn is_tool_entry(entry: &crate::types::ChatEntry) -> bool {
         || entry.entry_type == ChatEntryType::ToolConfirmation
 }
 
-/// 工具状态图标
+/// 工具状态统一用圆点表示，只改变颜色，避免终态切换符号造成视觉噪音和宽度跳动。
 pub fn get_tool_status_icon(
     entry: &crate::types::ChatEntry,
     theme: &Theme,
 ) -> (&'static str, Color) {
-    match &entry.status {
-        Some(EntryStatus::Success) => ("✓", theme.tool_success),
-        Some(EntryStatus::Error) => ("✗", theme.tool_error),
-        // 软失败：回合里非终结的工具报错 —— 灰化 ✗，不抢视觉焦点
-        Some(EntryStatus::SoftError) => ("✗", theme.subtle),
-        Some(EntryStatus::Warning) => ("⚠", theme.warning),
-        Some(EntryStatus::Cancelled) => ("⊘", theme.inactive),
-        Some(EntryStatus::InProgress) => ("●", theme.primary),
-        Some(EntryStatus::Pending) => ("○", theme.inactive), // 排队中 — dim
-        _ => {
-            // 根据条目类型和结果判断状态
-            if entry.entry_type == ChatEntryType::ToolResult {
-                if let Some(tr) = &entry.tool_result {
-                    if tr.success {
-                        ("✓", theme.tool_success)
-                    } else {
-                        ("✗", theme.tool_error)
-                    }
-                } else {
-                    ("⎿", theme.warning)
-                }
-            } else if entry.entry_type == ChatEntryType::ToolCall {
-                if entry.is_streaming == Some(true) {
-                    ("⎿", theme.primary)
-                } else {
-                    ("⎿", theme.primary)
-                }
-            } else {
-                ("", theme.foreground)
-            }
-        }
-    }
+    let color = match entry.status {
+        Some(EntryStatus::Success) => theme.tool_success,
+        Some(EntryStatus::Error) => theme.tool_error,
+        // 非终结的工具报错保持弱化，不抢占整个回合的视觉焦点。
+        Some(EntryStatus::SoftError) => theme.subtle,
+        Some(EntryStatus::Warning) => theme.warning,
+        Some(EntryStatus::Cancelled | EntryStatus::Pending) => theme.inactive,
+        Some(EntryStatus::InProgress) => theme.primary,
+        _ => match entry.tool_result.as_ref() {
+            Some(result) if result.success => theme.tool_success,
+            Some(_) => theme.tool_error,
+            None if entry.is_streaming == Some(true) => theme.primary,
+            None => theme.inactive,
+        },
+    };
+    ("●", color)
 }
 
 /// 工具名称颜色 — 使用热粉色边框色
@@ -250,19 +234,8 @@ pub(crate) fn render_tool_entry_blocks(
     // ToolResult: 无标记，直接显示结果内容
     if entry.entry_type == ChatEntryType::ToolCall {
         // ToolCall 行：圆点 + 工具名称 + 参数
-        // 运行时闪烁通过颜色明暗切换实现，字符恒为 ●；终态按执行结果取标记。
-        // 不能用空格替代 ● —— CJK 终端下 ● 是双宽、空格是单宽，
-        // 交替会导致整行文字左右移动（所有工具行都会抖动）。
-        let marker = if cancelling || entry.status == Some(EntryStatus::Cancelled) {
-            "⊘"
-        } else if matches!(
-            entry.status,
-            Some(EntryStatus::Error | EntryStatus::SoftError)
-        ) {
-            "✗"
-        } else {
-            "●"
-        };
+        // 运行态和终态始终使用同一个圆点，闪烁也只切换颜色，不能改变字符宽度。
+        let (marker, status_color) = get_tool_status_icon(entry, theme);
         let marker_color = if cancelling {
             theme.warning
         } else if is_streaming {
@@ -272,13 +245,7 @@ pub(crate) fn render_tool_entry_blocks(
                 theme.inactive // 闪烁"灭"态：暗色圆点，宽度不变
             }
         } else {
-            match entry.status {
-                Some(EntryStatus::Error) => theme.tool_error,
-                Some(EntryStatus::SoftError) => theme.subtle,
-                Some(EntryStatus::Cancelled) => theme.inactive,
-                Some(EntryStatus::Success) => theme.tool_success,
-                _ => theme.inactive,
-            }
+            status_color
         };
 
         // 第一行：圆点 + 工具信息（在 content_lines 中已经渲染好了）
@@ -335,6 +302,24 @@ pub(crate) fn render_tool_entry_blocks(
         }
     }
 
+    if is_tool_result {
+        // 输出内部的空行保留；块边缘留白交给聊天布局统一管理，不能随工具输出而变化。
+        let first = boxed_lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| !span.content.trim().is_empty())
+            })
+            .unwrap_or(boxed_lines.len());
+        boxed_lines.drain(..first);
+        while boxed_lines
+            .last()
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+        {
+            boxed_lines.pop();
+        }
+    }
     if !boxed_lines.is_empty() {
         blocks.push(boxed_lines);
     }
@@ -2049,6 +2034,86 @@ mod tests {
         assert_eq!(first_line_text(&blocks), "● Update Todos");
     }
 
+    /// 状态只改变圆点颜色，失败、取消和排队都不能切换成另一种符号。
+    #[test]
+    fn tool_status_uses_a_dot_for_every_state() {
+        let mut state = ChatState::test_fixture();
+        let theme = state.theme_manager.current().clone();
+        for (status, color) in [
+            (EntryStatus::Success, theme.tool_success),
+            (EntryStatus::Error, theme.tool_error),
+            (EntryStatus::SoftError, theme.subtle),
+            (EntryStatus::Warning, theme.warning),
+            (EntryStatus::Cancelled, theme.inactive),
+            (EntryStatus::Pending, theme.inactive),
+            (EntryStatus::InProgress, theme.primary),
+        ] {
+            let mut entry = tool_call_entry("Bash", r#"{"command":"false"}"#);
+            entry.status = Some(status);
+            assert_eq!(get_tool_status_icon(&entry, &theme), ("●", color));
+            let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
+            assert!(first_line_text(&blocks).starts_with("● bash("));
+            assert_eq!(blocks[0][0].spans[0].style.fg, Some(color));
+        }
+        let mut entry = tool_call_entry("Bash", r#"{"command":"sleep 1"}"#);
+        entry.is_streaming = Some(true);
+        for (tick, color) in [(0, theme.primary), (18, theme.inactive)] {
+            state.animation_tick = tick;
+            let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
+            assert_eq!(blocks[0][0].spans[0].content, "● ");
+            assert_eq!(blocks[0][0].spans[0].style.fg, Some(color));
+        }
+        state.cancelling_since = Some(std::time::Instant::now());
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
+        assert_eq!(blocks[0][0].spans[0].content, "● ");
+        assert_eq!(blocks[0][0].spans[0].style.fg, Some(theme.warning));
+    }
+
+    /// 输出块只清理边缘留白，不吞掉正文内部有意义的空行。
+    #[test]
+    fn tool_result_trims_edge_spacing_but_keeps_internal_blank_lines() {
+        let state = ChatState::test_fixture();
+        let entry = crate::types::ChatEntry::new(
+            ChatEntryType::ToolResult,
+            "\n\nfirst\n\nsecond\n\n".into(),
+        );
+        let blocks = render_tool_entry_blocks(&state, &entry, 0, 72, false, false, false);
+        let lines = &blocks[0];
+        let texts: Vec<_> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(texts, ["  ⎿  first", "", "     second"]);
+    }
+
+    #[test]
+    fn snapshot_tool_status_dots() {
+        let state = ChatState::test_fixture();
+        let mut lines = Vec::new();
+        for status in [
+            EntryStatus::Success,
+            EntryStatus::Error,
+            EntryStatus::SoftError,
+            EntryStatus::Warning,
+            EntryStatus::Cancelled,
+            EntryStatus::Pending,
+        ] {
+            let mut entry = tool_call_entry("Bash", r#"{"command":"cargo check"}"#);
+            entry.status = Some(status);
+            lines.extend(
+                render_tool_entry_blocks(&state, &entry, 0, 44, false, false, false)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        assert_lines_render!("tool_status_dots", 44, 6, &lines);
+    }
+
     // ── 渲染快照 ────────────────────────────────────────────────────────────
     //
     // 上面那些断言都是"某段文字在不在"，既对不上位置，也对不上颜色。工具条目是
@@ -2167,6 +2232,7 @@ mod tests {
     /// 权威来源是 `data` 里的文件路径列表。
     #[test]
     fn glob_summary_of_an_empty_result_is_not_one_file() {
+        let _state = ChatState::test_fixture();
         let entry = tool_result_entry(
             "Glob",
             "No files found matching pattern \"**/*.svg\" within /tmp/test_svg",

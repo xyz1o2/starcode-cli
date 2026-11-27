@@ -509,7 +509,10 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
     }
 
     let wrap_width = area_width.saturating_sub(2) as usize;
-    for sub in &info.sub_entries {
+    for (idx, sub) in info.sub_entries.iter().enumerate() {
+        if entry_leading_blank_rows(&info.sub_entries, idx) > 0 {
+            lines.push(Line::from(""));
+        }
         let blocks = if super::tool_render::is_tool_entry(sub) {
             super::tool_render::render_tool_entry_blocks(
                 state,
@@ -545,26 +548,28 @@ fn render_teammate_view(state: &ChatState, area_width: u16) -> Option<Vec<Line<'
 /// `[前导空行] + [● 工具名(参数)]`，两处各算一次的话，命中测试会跟屏幕上
 /// 的那一行错开 —— 于是「点工具名」打空，点工具名上面那行空白反而有反应。
 ///
-/// 规则：除首条外都垫一行，但工具序列（ToolCall/ToolResult/ToolConfirmation）
-/// 之间、以及 Agent 任务条目之间连续排布，不垫。
+/// 规则：新工具调用前固定垫一行；同一调用的确认与结果紧随其后。
+/// 其他消息除首条外垫一行，Agent 任务条目之间保持连续。
 pub fn leading_blank_rows(state: &ChatState, entry_idx: usize) -> usize {
-    if entry_idx == 0 {
-        return 0;
-    }
-    let Some(entry) = state.chat_history.get(entry_idx) else {
+    entry_leading_blank_rows(&state.chat_history, entry_idx)
+}
+
+/// 主聊天、分组工具与队友转录共用同一套间距，不依赖各工具的输出长度或折叠提示。
+fn entry_leading_blank_rows(entries: &[crate::types::ChatEntry], entry_idx: usize) -> usize {
+    let Some(prev_idx) = entry_idx.checked_sub(1) else {
         return 0;
     };
-    let Some(prev) = state.chat_history.get(entry_idx - 1) else {
+    let Some(entry) = entries.get(entry_idx) else {
         return 0;
     };
-    // 工具调用序列：ToolCall/ToolResult/ToolConfirmation 之间不加空行
+    let Some(prev) = entries.get(prev_idx) else {
+        return 0;
+    };
+    // 调用头是新块的起点，确认回执与结果则附属于前面的工具块。
     let is_tool_sequence = matches!(
         entry.entry_type,
-        ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
-    ) && matches!(
-        prev.entry_type,
-        ChatEntryType::ToolCall | ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
-    );
+        ChatEntryType::ToolResult | ChatEntryType::ToolConfirmation
+    ) && super::tool_render::is_tool_entry(prev);
     // Agent 任务条目之间不加空行
     let is_agent_sequence = matches!(
         entry.entry_type,
@@ -631,8 +636,11 @@ pub(crate) fn render_entry_lines(
     } else if entry.entry_type == ChatEntryType::GroupedToolUse {
         // 分组工具调用：展开显示子条目
         if let Some(sub_entries) = &entry.collapsed_entries {
-            for sub in sub_entries {
+            for (idx, sub) in sub_entries.iter().enumerate() {
                 if super::tool_render::is_tool_entry(sub) {
+                    if entry_leading_blank_rows(sub_entries, idx) > 0 {
+                        blocks.push(vec![Line::from("")]);
+                    }
                     blocks.extend(super::tool_render::render_tool_entry_blocks(
                         state, sub, entry_idx, area_width, false, false, false,
                     ));
@@ -659,14 +667,8 @@ pub(crate) fn render_entry_lines(
         entry_lines.extend(b);
     }
 
-    // ── Uniform leading spacing ──
-    // Unified rule: all entries get 1 blank line separator, EXCEPT:
-    //   - First entry (no blank)
-    //   - ToolResult/ToolConfirmation immediately after ToolCall (flow together)
-    //   - ToolCall immediately after ToolCall (multiple tool calls in sequence)
-    //   - ToolCall immediately after ToolResult (continuation of tool sequence)
-    //   - AgentTask/AgentGroup entries (always flow together)
-    if leading_blank_rows(state, entry_idx) > 0 {
+    // 间距与鼠标命中共用 leading_blank_rows：新调用分块，确认和结果不拆开。
+    if !entry_lines.is_empty() && leading_blank_rows(state, entry_idx) > 0 {
         entry_lines.insert(0, Line::from(""));
     }
 
@@ -708,6 +710,169 @@ pub(crate) fn render_entry_lines(
 #[cfg(test)]
 mod teammate_view_tests {
     use super::*;
+
+    /// 不同长度、是否有折叠提示，都不能改变相邻工具块之间的一行分隔。
+    #[test]
+    fn tool_calls_start_new_blocks_while_confirmations_and_results_stay_attached() {
+        use crate::types::ChatEntry;
+        let mut state = ChatState::test_fixture();
+        state.chat_history = [
+            ChatEntryType::ToolCall,
+            ChatEntryType::ToolConfirmation,
+            ChatEntryType::ToolResult,
+            ChatEntryType::ToolCall,
+            ChatEntryType::ToolResult,
+            ChatEntryType::ToolCall,
+            ChatEntryType::ToolCall,
+            ChatEntryType::Assistant,
+            ChatEntryType::ToolCall,
+        ]
+        .into_iter()
+        .map(|kind| ChatEntry::new(kind, "".into()))
+        .collect();
+        let spacing: Vec<_> = (0..state.chat_history.len())
+            .map(|idx| leading_blank_rows(&state, idx))
+            .collect();
+        assert_eq!(spacing, [0, 0, 0, 1, 0, 1, 1, 1, 1]);
+    }
+
+    /// 独立确认卡收起后也不能留下一条空白占位行。
+    #[test]
+    fn hidden_once_confirmation_has_no_separator_row() {
+        use crate::types::{ChatEntry, ConfirmationDetails, ConfirmationType, ToolConfirmation};
+        let mut state = ChatState::test_fixture();
+        let mut entry = ChatEntry::new(ChatEntryType::ToolConfirmation, String::new());
+        entry.confirmation = Some(ToolConfirmation {
+            tool_name: "Edit".into(),
+            operation_type: ConfirmationType::Generic,
+            details: ConfirmationDetails::Generic {
+                title: "Edit".into(),
+                prompt: "Update src/main.rs".into(),
+            },
+            is_dangerous: false,
+            outcome: Some(crate::core::i18n::t1("ui.confirm.outcome.once")),
+            reason: None,
+        });
+        state.chat_history = vec![
+            ChatEntry::new(ChatEntryType::Assistant, "Ready".into()),
+            entry,
+        ];
+        for width in [24, 44, 96] {
+            assert!(render_entry_lines(&state, 1, width).is_empty());
+        }
+    }
+
+    fn tool_transcript() -> Vec<crate::types::ChatEntry> {
+        use crate::types::{
+            ChatEntry, EntryStatus, StarToolCall, StarToolCallFunction, ToolResult,
+        };
+        let mut entries = Vec::new();
+        for (id, name, arguments, output, status) in [
+            (
+                "one",
+                "Bash",
+                r#"{"command":"pwd"}"#,
+                "/project",
+                EntryStatus::Success,
+            ),
+            (
+                "two",
+                "Bash",
+                r#"{"command":"false"}"#,
+                "Command exited with code: 1",
+                EntryStatus::SoftError,
+            ),
+            (
+                "three",
+                "Grep",
+                r#"{"pattern":"TODO","path":"."}"#,
+                "No matches",
+                EntryStatus::Success,
+            ),
+        ] {
+            let call = StarToolCall {
+                id: id.into(),
+                call_type: "function".into(),
+                function: StarToolCallFunction {
+                    name: name.into(),
+                    arguments: arguments.into(),
+                },
+            };
+            let success = status == EntryStatus::Success;
+            let mut header = ChatEntry::tool_call("", call.clone());
+            header.status = Some(status.clone());
+            header.is_streaming = Some(false);
+            entries.push(header);
+            let mut result = ChatEntry::tool_result(
+                "",
+                call,
+                ToolResult {
+                    success,
+                    output: success.then(|| output.into()),
+                    error: (!success).then(|| output.into()),
+                    data: None,
+                    llm_content: None,
+                },
+            );
+            result.status = Some(status);
+            entries.push(result);
+        }
+        entries
+    }
+
+    #[test]
+    fn snapshot_tool_transcript_spacing() {
+        let mut state = ChatState::test_fixture();
+        state.chat_history = tool_transcript();
+        let lines: Vec<_> = (0..state.chat_history.len())
+            .flat_map(|idx| render_entry_lines(&state, idx, 60))
+            .collect();
+        let headers: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.spans
+                    .first()
+                    .is_some_and(|span| span.content.starts_with("● "))
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        assert_eq!(headers.len(), 3);
+        for idx in headers.into_iter().skip(1) {
+            assert!(lines[idx - 1]
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty()));
+            assert!(lines[idx - 2]
+                .spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty()));
+        }
+        crate::ui::test_support::assert_lines_render!("tool_transcript_spacing", 60, 16, &lines);
+    }
+
+    #[test]
+    fn grouped_tool_transcript_uses_the_same_spacing_as_main_chat() {
+        for width in [24, 44, 96] {
+            for expanded in [false, true] {
+                let mut state = ChatState::test_fixture();
+                state.chat_history = tool_transcript();
+                if expanded {
+                    state
+                        .expanded_tool_call_ids
+                        .extend(["one", "two", "three"].into_iter().map(String::from));
+                }
+                let main: Vec<_> = (0..state.chat_history.len())
+                    .flat_map(|idx| render_entry_lines(&state, idx, width))
+                    .collect();
+                let mut group =
+                    crate::types::ChatEntry::new(ChatEntryType::GroupedToolUse, "".into());
+                group.collapsed_entries = Some(std::mem::take(&mut state.chat_history));
+                state.chat_history.push(group);
+                assert_eq!(render_entry_lines(&state, 0, width), main);
+            }
+        }
+    }
 
     #[test]
     fn teammate_detail_renders_one_call_header_and_its_result_at_varied_widths() {

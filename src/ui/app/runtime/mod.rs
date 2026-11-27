@@ -534,6 +534,7 @@ pub async fn run_ui_loop(
                 .unwrap_or(false)
         {
             state.is_streaming = false;
+            state.active_retry_status = None;
             state.is_processing = false;
             state.cancelling_since = None;
             state.current_tool_name = None;
@@ -582,6 +583,7 @@ pub async fn run_ui_loop(
                 "[STALL] no stream activity for {}s, releasing the UI spinner",
                 stall_secs
             ));
+            state.active_retry_status = None;
             state.is_processing = false;
             state.is_streaming = false;
             state.current_tool_name = None;
@@ -692,6 +694,7 @@ pub async fn run_ui_loop(
                         state.current_status_line =
                             Some("Worker disconnected — press Enter to retry".to_string());
                         state.is_streaming = false;
+                        state.active_retry_status = None;
                         state.is_processing = false;
                         state.end_thinking();
                         needs_redraw = true;
@@ -770,6 +773,7 @@ pub async fn run_ui_loop(
                         state.current_status_line =
                             Some("Worker disconnected — press Enter to retry".to_string());
                         state.is_streaming = false;
+                        state.active_retry_status = None;
                         state.is_processing = false;
                         state.end_thinking();
                         needs_redraw = true;

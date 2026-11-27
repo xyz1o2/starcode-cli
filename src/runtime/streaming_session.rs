@@ -13,10 +13,181 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn retry_wait_handles_control_requests_without_waiting_for_backoff() {
+        crate::core::i18n::reset_for_tests();
+        for scenario in ["abort", "shutdown", "closed", "flag", "ordinary"] {
+            let (tx, mut events) = mpsc::channel(64);
+            let (requests, mut rx) = mpsc::channel(4);
+            let mut bus_rx = None;
+            let abort_flag = Arc::new(AtomicBool::new(scenario == "flag"));
+            let steering_queue = Arc::new(AsyncMessageQueue::new());
+            let steering_signal = Arc::new(Notify::new());
+            let message_bus = Arc::new(crate::core::confirmation_bus::MessageBus::new(
+                crate::core::policy::PolicyEngine::new(Default::default()),
+                false,
+            ));
+            let model_switch_cell = crate::agent::model_switch::new_cell();
+            let mut deferred = DeferredRuntimeActions::default();
+            match scenario {
+                "abort" => requests.send(AgentRequest::Abort).await.unwrap(),
+                "shutdown" => {
+                    let (response, _rx) = mpsc::channel(1);
+                    requests
+                        .send(AgentRequest::Shutdown { response })
+                        .await
+                        .unwrap();
+                }
+                "ordinary" => requests
+                    .send(AgentRequest::StopBackgroundAgent {
+                        task_id: "missing".into(),
+                    })
+                    .await
+                    .unwrap(),
+                _ => {}
+            }
+            // 只有 closed 场景关闭输入，其他场景保持 sender 存活。
+            let _requests = if scenario == "closed" {
+                drop(requests);
+                None
+            } else {
+                Some(requests)
+            };
+            let mut context = StreamingSessionContext {
+                tx: &tx,
+                rx: &mut rx,
+                bus_rx: &mut bus_rx,
+                message_id: 7,
+                user_message: "test",
+                images: &[],
+                current_model_snapshot: "test",
+                project_root: None,
+                abort_flag: &abort_flag,
+                steering_queue: &steering_queue,
+                steering_signal: &steering_signal,
+                message_bus: &message_bus,
+                model_switch_cell: &model_switch_cell,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                wait_for_stream_retry(
+                    &mut context,
+                    &mut deferred,
+                    None,
+                    crate::llm::error_kind::LlmErrorKind::Network,
+                    0,
+                    if scenario == "ordinary" { 10 } else { 60_000 },
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{scenario}: 控制请求必须在长退避结束前处理"));
+            assert!(
+                match scenario {
+                    "closed" => matches!(result, Some(StreamingSessionResult::WorkerClosed)),
+                    "shutdown" => matches!(result, Some(StreamingSessionResult::Shutdown)),
+                    "ordinary" => result.is_none(),
+                    _ => matches!(result, Some(StreamingSessionResult::Completed)),
+                },
+                "{scenario}"
+            );
+            if matches!(scenario, "abort" | "shutdown" | "flag") {
+                assert!(abort_flag.load(Ordering::SeqCst));
+            }
+            let mut done_count = 0;
+            let mut saw_ordinary_result = false;
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    StreamMessage::Done { message_id: 7 } => done_count += 1,
+                    StreamMessage::BackgroundAgentStopResult { .. } => saw_ordinary_result = true,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                done_count,
+                usize::from(matches!(scenario, "abort" | "shutdown" | "flag")),
+                "{scenario}"
+            );
+            assert_eq!(saw_ordinary_result, scenario == "ordinary");
+        }
+    }
+}
+
 pub enum StreamingSessionResult {
     Completed,
     WorkerClosed,
     Shutdown,
+}
+
+/// 退避时仍消费 UI 请求，否则 Abort 只能排在 sleep 后面，无法及时取消重试。
+async fn wait_for_stream_retry(
+    context: &mut StreamingSessionContext<'_>,
+    deferred: &mut DeferredRuntimeActions,
+    subagent_tasks: Option<crate::agent::subagent::tasks::SharedSubagentTasks>,
+    kind: crate::llm::error_kind::LlmErrorKind,
+    attempt: u32,
+    delay_ms: u64,
+) -> Option<StreamingSessionResult> {
+    let tx = context.tx;
+    let message_id = context.message_id;
+    let waiting = crate::llm::retry::wait_interruptible(
+        std::time::Duration::from_millis(delay_ms),
+        Some(context.abort_flag.as_ref()),
+        |remaining| {
+            let _ = tx.try_send(StreamMessage::RetryStatus {
+                message_id,
+                status: crate::llm::retry::waiting_status(kind, attempt, remaining),
+            });
+        },
+    );
+    tokio::pin!(waiting);
+    loop {
+        let outcome = tokio::select! {
+            // 同时就绪时先处理取消，不能抢先发出下一次请求。
+            biased;
+            request = context.rx.recv() => {
+                crate::runtime::session::handle_streaming_request(
+                    deferred,
+                    request,
+                    StreamingRequestContext {
+                        tx,
+                        message_id,
+                        user_message: context.user_message,
+                        current_model_snapshot: context.current_model_snapshot,
+                        project_root: context.project_root,
+                        abort_flag: context.abort_flag,
+                        steering_queue: context.steering_queue,
+                        steering_signal: context.steering_signal,
+                        message_bus: context.message_bus,
+                        subagent_tasks: subagent_tasks.clone(),
+                        model_switch_cell: context.model_switch_cell,
+                    },
+                ).await
+            }
+            completed = &mut waiting => {
+                if completed {
+                    return None;
+                }
+                let _ = tx.send(StreamMessage::Done { message_id }).await;
+                return Some(StreamingSessionResult::Completed);
+            }
+        };
+        let result = match outcome {
+            StreamingRequestOutcome::Continue => continue,
+            StreamingRequestOutcome::Return => return Some(StreamingSessionResult::WorkerClosed),
+            // Abort 的 handler 已发 Done，不能重复发布终态。
+            StreamingRequestOutcome::Abort => return Some(StreamingSessionResult::Completed),
+            StreamingRequestOutcome::Shutdown => StreamingSessionResult::Shutdown,
+            StreamingRequestOutcome::Break => StreamingSessionResult::Completed,
+        };
+        let _ = tx.send(StreamMessage::Done { message_id }).await;
+        return Some(result);
+    }
 }
 
 pub struct StreamingSessionContext<'a> {
@@ -55,7 +226,7 @@ pub struct StreamingSessionContext<'a> {
 pub async fn run_streaming_session(
     agent: &mut StarAgent,
     deferred: &mut DeferredRuntimeActions,
-    context: StreamingSessionContext<'_>,
+    mut context: StreamingSessionContext<'_>,
 ) -> StreamingSessionResult {
     append_debug_log_line(&format!(
         "[Worker] Starting agent stream: id={}, msg_len={}",
@@ -184,61 +355,26 @@ pub async fn run_streaming_session(
                                     // 只有零 chunk（内容未落地）且可重试类别才重建流。
                                     match retry_policy.decide(&error_msg, chunk_count) {
                                         crate::runtime::stream_retry::StreamFailureDecision::Retry {
+                                            kind,
+                                            attempt,
                                             delay_ms,
                                             waiting_status,
                                             retrying_status,
                                         } => {
-                                            let _ = context.tx.send(StreamMessage::StatusUpdate {
+                                            let _ = context.tx.send(StreamMessage::RetryStatus {
                                                 message_id: context.message_id,
                                                 status: waiting_status.clone(),
                                             }).await;
-                                            let kind_label = waiting_status
-                                                .split(" — ")
-                                                .next()
-                                                .unwrap_or("Error")
-                                                .to_string();
-                                            let attempt_line = waiting_status
-                                                .rsplit('(')
-                                                .next()
-                                                .map(|s| s.trim_end_matches(')').to_string())
-                                                .unwrap_or_default();
-                                            let interrupted = !crate::llm::retry::wait_interruptible(
-                                                std::time::Duration::from_millis(delay_ms),
-                                                Some(context.abort_flag.as_ref()),
-                                                |remaining| {
-                                                    // 每秒刷新倒计时（on_tick 回调）：
-                                                    // 等待最长可达 32s，静止的文案会让
-                                                    // 用户以为卡死了。
-                                                    let text = format!(
-                                                        "{} — retry {} in {:.0}s ({})",
-                                                        kind_label,
-                                                        attempt_line
-                                                            .split('/')
-                                                            .next()
-                                                            .unwrap_or("1"),
-                                                        remaining.as_secs_f64().ceil(),
-                                                        attempt_line,
-                                                    );
-                                                    let _ = context
-                                                        .tx
-                                                        .try_send(StreamMessage::StatusUpdate {
-                                                            message_id: context.message_id,
-                                                            status: text,
-                                                        });
-                                                },
-                                            ).await;
-                                            if interrupted {
-                                                let _ = context.tx.send(StreamMessage::Error {
-                                                    message_id: context.message_id,
-                                                    error: "Cancelled while waiting to retry.".to_string(),
-                                                }).await;
-                                                break 'attempt;
+                                            if let Some(result) = wait_for_stream_retry(
+                                                &mut context, deferred, subagent_tasks.clone(), kind, attempt, delay_ms,
+                                            ).await {
+                                                return result;
                                             }
                                             append_debug_log_line(&format!(
                                                 "[Worker] Stream retry: {}",
                                                 retrying_status
                                             ));
-                                            let _ = context.tx.send(StreamMessage::StatusUpdate {
+                                            let _ = context.tx.send(StreamMessage::RetryStatus {
                                                 message_id: context.message_id,
                                                 status: retrying_status,
                                             }).await;
@@ -274,56 +410,30 @@ pub async fn run_streaming_session(
                 append_debug_log_line(&format!("[Worker] Agent stream init failed: {}", error_msg));
                 match retry_policy.decide(&error_msg, 0) {
                     crate::runtime::stream_retry::StreamFailureDecision::Retry {
+                        kind,
+                        attempt,
                         delay_ms,
                         waiting_status,
                         retrying_status,
                     } => {
                         let _ = context
                             .tx
-                            .send(StreamMessage::StatusUpdate {
+                            .send(StreamMessage::RetryStatus {
                                 message_id: context.message_id,
                                 status: waiting_status.clone(),
                             })
                             .await;
-                        let kind_label = waiting_status
-                            .split(" — ")
-                            .next()
-                            .unwrap_or("Error")
-                            .to_string();
-                        let attempt_line = waiting_status
-                            .rsplit('(')
-                            .next()
-                            .map(|s| s.trim_end_matches(')').to_string())
-                            .unwrap_or_default();
-                        let interrupted = !crate::llm::retry::wait_interruptible(
-                            std::time::Duration::from_millis(delay_ms),
-                            Some(context.abort_flag.as_ref()),
-                            |remaining| {
-                                // 每秒刷新倒计时（on_tick 回调）：等待最长可达 32s，
-                                // 静止的文案会让用户以为卡死了。
-                                let text = format!(
-                                    "{} — retry {} in {:.0}s ({})",
-                                    kind_label,
-                                    attempt_line.split('/').next().unwrap_or("1"),
-                                    remaining.as_secs_f64().ceil(),
-                                    attempt_line,
-                                );
-                                let _ = context.tx.try_send(StreamMessage::StatusUpdate {
-                                    message_id: context.message_id,
-                                    status: text,
-                                });
-                            },
+                        if let Some(result) = wait_for_stream_retry(
+                            &mut context,
+                            deferred,
+                            subagent_tasks.clone(),
+                            kind,
+                            attempt,
+                            delay_ms,
                         )
-                        .await;
-                        if interrupted {
-                            let _ = context
-                                .tx
-                                .send(StreamMessage::Error {
-                                    message_id: context.message_id,
-                                    error: "Cancelled while waiting to retry.".to_string(),
-                                })
-                                .await;
-                            break 'attempt;
+                        .await
+                        {
+                            return result;
                         }
                         append_debug_log_line(&format!(
                             "[Worker] Stream retry: {}",
@@ -331,7 +441,7 @@ pub async fn run_streaming_session(
                         ));
                         let _ = context
                             .tx
-                            .send(StreamMessage::StatusUpdate {
+                            .send(StreamMessage::RetryStatus {
                                 message_id: context.message_id,
                                 status: retrying_status,
                             })

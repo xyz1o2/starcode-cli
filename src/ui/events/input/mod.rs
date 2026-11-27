@@ -988,6 +988,7 @@ async fn copy_selection_or_interrupt(state: &mut ChatState, agent_tx: &mpsc::Sen
         match agent_tx.try_send(AgentRequest::Abort) {
             Ok(()) => {
                 state.current_status_line = Some(crate::core::i18n::t1("ui.thinking.cancelling"));
+                state.active_retry_status = None;
                 state.is_processing = false;
                 state.cancelling_since = Some(now);
             }
@@ -1552,6 +1553,7 @@ pub async fn handle_key_event(
             if state.is_streaming || state.is_processing {
                 let _ = agent_tx.send(AgentRequest::Abort).await;
                 state.current_status_line = Some("Cancelling...".to_string());
+                state.active_retry_status = None;
                 state.is_processing = false;
                 state.cancelling_since = Some(Instant::now());
                 return Ok(());

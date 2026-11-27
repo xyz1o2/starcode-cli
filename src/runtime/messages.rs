@@ -295,6 +295,11 @@ pub enum StreamMessage {
         message_id: u64,
         status: String,
     },
+    /// 有上限的模型重试进度；与普通阶段状态独立展示。
+    RetryStatus {
+        message_id: u64,
+        status: String,
+    },
     /// Agent 任务生命周期更新（启动/进度/完成）
     AgentTaskUpdate {
         message_id: u64,

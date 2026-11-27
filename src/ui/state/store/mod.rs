@@ -118,6 +118,8 @@ pub struct ChatState {
     /// （对标 Claude Code Spinner，每个状态至少驻留 2 秒再消失）。
     pub thinking_finished: Option<(u64, Instant)>,
     pub current_status_line: Option<String>,
+    /// 当前重试提示独立于请求阶段；有效输出、终态或取消时清除。
+    pub active_retry_status: Option<String>,
     pub available_models: Vec<String>,
     /// 完整的模型信息列表（包含 supports_thinking 等字段）
     pub available_models_info: Vec<crate::types::ModelInfo>,
@@ -927,6 +929,7 @@ impl ChatState {
             thinking_started_at: None,
             thinking_finished: None,
             current_status_line: None,
+            active_retry_status: None,
             available_models: Vec::new(),
             available_models_info: Vec::new(),
             model_provider_map: std::collections::HashMap::new(),

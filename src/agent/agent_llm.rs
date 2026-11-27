@@ -964,6 +964,7 @@ impl Agent {
             kind,
             LlmErrorKind::Network
                 | LlmErrorKind::StreamTimeout
+                | LlmErrorKind::ThinkingTimeout
                 | LlmErrorKind::ServerError
                 | LlmErrorKind::Overloaded
                 | LlmErrorKind::Unknown

@@ -42,47 +42,57 @@ fn build_auto_mode_transcript(messages: &[StarMessage], user_input: &str) -> Str
     const PER_MESSAGE_LIMIT: usize = 2000;
     const TOTAL_LIMIT: usize = 8000;
 
-    let mut out = String::new();
-    let mut budget = TOTAL_LIMIT;
+    // 角色前缀、换行和截断标记也计入字符预算，避免中文按字节提前耗尽。
+    fn bounded_line(role: &str, content: &str, limit: usize) -> String {
+        const MARKER: &str = "…[truncated]";
+        let body_limit = limit.saturating_sub(role.chars().count() + 3);
+        let body = if content.chars().count() > body_limit {
+            let take = body_limit.saturating_sub(MARKER.chars().count());
+            format!("{}{MARKER}", content.chars().take(take).collect::<String>())
+        } else {
+            content.to_string()
+        };
+        format!("{role}: {body}\n")
+    }
 
-    for msg in messages {
+    let current = user_input.trim();
+    let current_line = if current.is_empty() {
+        String::new()
+    } else {
+        bounded_line("user", current, PER_MESSAGE_LIMIT + "user".len() + 3)
+    };
+    let mut budget = TOTAL_LIMIT - current_line.chars().count();
+    let latest_user = messages.iter().rposition(|msg| msg.role == "user");
+    let mut recent = Vec::new();
+    for (idx, msg) in messages.iter().enumerate().rev() {
         let role = msg.role.as_str();
         if role != "user" && role != "assistant" {
             continue;
         }
-        let Some(content) = msg.content.as_deref() else {
+        let Some(content) = msg.content.as_deref().map(str::trim) else {
             continue;
         };
-        let content = content.trim();
-        if content.is_empty() {
+        if content.is_empty()
+            || (!current.is_empty() && Some(idx) == latest_user && content == current)
+        {
             continue;
         }
-
-        let take = content
-            .char_indices()
-            .nth(PER_MESSAGE_LIMIT)
-            .map(|(i, _)| i)
-            .unwrap_or(content.len());
-        let body = if take < content.len() {
-            format!("{}…[truncated]", &content[..take])
-        } else {
-            content.to_string()
-        };
-
-        let line = format!("{}: {}\n", role, body);
-        if line.len() > budget {
+        // 仅去掉与本轮输入完全一致的最新 user；带附件/附加上下文的消息不能丢。
+        if budget < role.chars().count() + 3 + "…[truncated]".chars().count() {
             break;
         }
-        budget -= line.len();
-        out.push_str(&line);
+        let line = bounded_line(
+            role,
+            content,
+            budget.min(PER_MESSAGE_LIMIT + role.len() + 3),
+        );
+        budget -= line.chars().count();
+        recent.push(line);
     }
-
-    // 兜底：会话消息还没建起来时，至少把当轮用户输入给分类器 ——
-    // "用户要什么"这句话本身就是最关键的意图信号。
-    if out.trim().is_empty() && !user_input.trim().is_empty() {
-        out = format!("user: {}\n", user_input.trim());
-    }
-
+    recent.reverse();
+    let mut out = recent.concat();
+    // 当前请求优先预留空间并置于末尾；旧历史再长也不能挤掉本轮意图。
+    out.push_str(&current_line);
     out
 }
 
@@ -890,6 +900,34 @@ mod tests {
     fn an_empty_session_falls_back_to_the_turn_input() {
         let transcript = build_auto_mode_transcript(&[], "删掉 target 目录");
         assert!(transcript.contains("删掉 target 目录"), "{transcript}");
+    }
+
+    #[test]
+    fn long_history_keeps_the_current_request() {
+        let mut messages = vec![StarMessage::user("old request".repeat(1000))];
+        for _ in 0..10 {
+            messages.push(StarMessage::assistant("历史内容".repeat(1000)));
+        }
+        messages.push(StarMessage::assistant("recent context"));
+        messages.push(StarMessage::user("edit queue"));
+        let text = build_auto_mode_transcript(&messages, "edit queue");
+        assert!(text.ends_with("user: edit queue\n"));
+        assert_eq!(text.matches("edit queue").count(), 1);
+        assert!(text.contains("recent context"));
+        assert!(!text.contains("old request"));
+        assert!(text.chars().count() <= 8000);
+        assert!(text.chars().count() > 6000);
+    }
+
+    #[test]
+    fn current_request_is_bounded_and_attached_context_is_kept() {
+        let text = build_auto_mode_transcript(&[], &"中".repeat(10_000));
+        assert!(text.contains("[truncated]"));
+        assert!(text.chars().count() <= 2007);
+        let messages = vec![StarMessage::user("request\nattached context")];
+        let text = build_auto_mode_transcript(&messages, "request");
+        assert!(text.contains("attached context"));
+        assert!(text.ends_with("user: request\n"));
     }
 
     /// 超长正文必须截断 —— 分类器上下文不能无限膨胀。

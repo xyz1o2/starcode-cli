@@ -230,8 +230,13 @@ impl LlmAutoModeClassifier {
         //
         // 只在首词是 allow/block 时做 —— 首词是 ask 时没有"相反"可言。
         let lower = text.to_ascii_lowercase();
-        let mentions_block = lower.contains("block") || lower.contains("deny");
-        let mentions_allow = lower.contains("allow");
+        // 只识别完整裁决词，不能把 blocking queue、blocked paths 等理由误判。
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        let mentions_block = words.iter().any(|word| matches!(*word, "block" | "deny"));
+        let mentions_allow = words.contains(&"allow");
 
         let conflicting = match first.as_str() {
             "allow" => mentions_block,
@@ -676,6 +681,39 @@ mod tests {
             LlmAutoModeClassifier::parse_verdict("ASK"),
             AutoVerdict::Ask { .. }
         ));
+    }
+
+    #[test]
+    fn ordinary_reason_words_are_not_conflicting_verdicts() {
+        for text in [
+            "ALLOW\nEdit the blocking queue implementation in the project.",
+            "ALLOW\nNo blocked paths are touched.",
+            "ALLOW — update the allowlist implementation.",
+        ] {
+            assert!(
+                matches!(
+                    LlmAutoModeClassifier::parse_verdict(text),
+                    AutoVerdict::Allow { .. }
+                ),
+                "{text}"
+            );
+        }
+        for text in [
+            "ALLOW is not appropriate here, BLOCK",
+            "ALLOW\nDecision: DENY",
+            "BLOCK\nVerdict: ALLOW",
+            "not allowed",
+            "Verdict: not allowed",
+            "unknown",
+        ] {
+            assert!(
+                matches!(
+                    LlmAutoModeClassifier::parse_verdict(text),
+                    AutoVerdict::Ask { .. }
+                ),
+                "{text}"
+            );
+        }
     }
 
     /// "not allowed" / "this is not permitted" 绝不能被解析成放行。

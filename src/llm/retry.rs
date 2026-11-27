@@ -56,23 +56,22 @@ pub fn delay_ms(err_str: &str, attempt: u32) -> u64 {
 
 /// 等待期间每个 tick 推给用户的一条状态文案。
 pub fn waiting_status(kind: LlmErrorKind, attempt: u32, remaining: Duration) -> String {
-    format!(
-        "{} — retry {}/{} in {:.0}s",
-        kind.label(),
-        attempt + 1,
-        max_attempts(),
-        remaining.as_secs_f64().ceil(),
-    )
+    crate::core::i18n::t1("llm.retry.waiting")
+        .replace("{attempt}", &(attempt + 1).to_string())
+        .replace("{max}", &max_attempts().to_string())
+        .replace(
+            "{seconds}",
+            &format!("{:.0}", remaining.as_secs_f64().ceil()),
+        )
+        .replace("{reason}", &kind.label())
 }
 
 /// 退避结束、即将重发前的一条状态文案。
 pub fn retrying_status(kind: LlmErrorKind, attempt: u32) -> String {
-    format!(
-        "{} — retrying now ({}/{})",
-        kind.label(),
-        attempt + 1,
-        max_attempts(),
-    )
+    crate::core::i18n::t1("llm.retry.requesting")
+        .replace("{attempt}", &(attempt + 1).to_string())
+        .replace("{max}", &max_attempts().to_string())
+        .replace("{reason}", &kind.label())
 }
 
 /// 重试预算用尽时的一条日志文案（内部诊断用，不显示给用户——
@@ -139,10 +138,11 @@ mod tests {
 
     #[test]
     fn status_copies_are_stable_and_bounded() {
+        crate::core::i18n::reset_for_tests();
         let s = waiting_status(LlmErrorKind::Network, 0, Duration::from_secs(5));
-        assert_eq!(s, "Network Error — retry 1/3 in 5s");
+        assert_eq!(s, "Retry 1/3 in 5s — Network Error");
         let s = retrying_status(LlmErrorKind::ServerError, 1);
-        assert_eq!(s, "Provider Error — retrying now (2/3)");
+        assert_eq!(s, "Retrying 2/3 — Provider Error");
         let s = exhausted_log(LlmErrorKind::Network, 3);
         assert_eq!(s, "Network Error exhausted after 3 attempt(s) — giving up");
     }

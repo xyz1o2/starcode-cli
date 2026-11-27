@@ -21,6 +21,8 @@ pub(crate) enum StreamFailureDecision {
     /// 退避后整条流重建重试。`waiting_status` / `retrying_status` 是按
     /// 内核文案生成的两条状态 —— 等待前后各发一次，与 agent 循环一致。
     Retry {
+        kind: LlmErrorKind,
+        attempt: u32,
         delay_ms: u64,
         waiting_status: String,
         retrying_status: String,
@@ -52,6 +54,7 @@ impl StreamRetryPolicy {
             kind,
             LlmErrorKind::Network
                 | LlmErrorKind::StreamTimeout
+                | LlmErrorKind::ThinkingTimeout
                 | LlmErrorKind::ServerError
                 | LlmErrorKind::Overloaded
                 | LlmErrorKind::RateLimit
@@ -82,6 +85,8 @@ impl StreamRetryPolicy {
             delay,
         ));
         StreamFailureDecision::Retry {
+            kind,
+            attempt,
             delay_ms: delay,
             waiting_status: retry::waiting_status(
                 kind,
@@ -122,6 +127,27 @@ mod tests {
             StreamRetryPolicy::default().decide(error, 1),
             StreamFailureDecision::GiveUp(_)
         ));
+    }
+
+    #[test]
+    fn thinking_timeout_retries_with_its_own_diagnosis() {
+        crate::core::i18n::reset_for_tests();
+        let error = "Thinking timeout after 10.0s without usable content";
+        let kind = LlmErrorKind::classify(error);
+        assert_eq!(kind, LlmErrorKind::ThinkingTimeout);
+        assert!(kind.is_retryable());
+        let mut policy = StreamRetryPolicy::default();
+        assert_eq!(
+            retries_until_give_up(&mut policy, error),
+            retry::max_attempts() as usize
+        );
+        let StreamFailureDecision::GiveUp(text) = policy.decide(error, 0) else {
+            panic!("retry budget must be finite");
+        };
+        assert!(text.contains("Thinking Timeout"), "{text}");
+        assert!(text.contains("STAR_MAX_THINKING_SECS"), "{text}");
+        assert!(!text.contains("HTTPS_PROXY"), "{text}");
+        assert!(text.contains(error), "{text}");
     }
 
     #[test]
@@ -181,6 +207,7 @@ mod tests {
 
     #[test]
     fn retry_status_copy_carries_the_label_and_counter() {
+        crate::core::i18n::reset_for_tests();
         let mut policy = StreamRetryPolicy::default();
         match policy.decide("operation timed out", 0) {
             StreamFailureDecision::Retry {
@@ -190,8 +217,9 @@ mod tests {
             } => {
                 // 延迟带 ±25% 抖动，剩余秒数上取整会落在 1-2s 之间，
                 // 只锁文案结构不锁具体秒数。
-                assert!(waiting_status.starts_with("Network Error — retry 1/3 in "));
-                assert_eq!(retrying_status, "Network Error — retrying now (1/3)");
+                assert!(waiting_status.starts_with("Retry 1/3 in "));
+                assert!(waiting_status.ends_with(" — Network Error"));
+                assert_eq!(retrying_status, "Retrying 1/3 — Network Error");
             }
             _ => panic!("network failure should retry"),
         }

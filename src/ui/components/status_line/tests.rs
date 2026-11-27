@@ -1,6 +1,42 @@
 //! 状态栏与 spinner 的测试。
-//!
-use super::*;
+
+#[test]
+fn retry_progress_stays_visible_at_narrow_width_without_extra_rows() {
+    let mut state = crate::ui::state::ChatState::test_fixture();
+    state.is_processing = true;
+    state.active_retry_status = Some("Retry 1/3 in 12s — Network Error".into());
+    state.current_status_line = Some("Waiting for provider response".into());
+    for width in [0, 1, 2, 3, 12, 24, 44, 96] {
+        let lines = processing_spinner_line(&state, width);
+        assert_eq!(lines.len(), 2);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        if width >= 24 {
+            assert!(text.contains("1/3"), "{width}: {text}");
+        }
+        if width >= 12 {
+            // 上行正文与下行动词共享同一列，不与 spinner 字形或输入框左边缘对齐。
+            let verb_column = lines[1].spans[0].width();
+            assert_eq!(text.chars().take_while(|c| *c == ' ').count(), verb_column);
+            assert!(text.trim_start().starts_with("Retry"));
+        }
+        assert!(lines[0].width() <= width as usize);
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(state.theme_manager.current().warning)
+        );
+    }
+    state.is_awaiting_confirmation = true;
+    assert_eq!(processing_spinner_line(&state, 44)[0].width(), 0);
+    state.is_awaiting_confirmation = false;
+    state.cancelling_since = Some(std::time::Instant::now());
+    assert_eq!(processing_spinner_line(&state, 44)[0].width(), 0);
+    state.is_processing = false;
+    assert!(processing_spinner_line(&state, 44).is_empty());
+}
 
 use super::*;
 use crate::ui::themes::ThemeManager;

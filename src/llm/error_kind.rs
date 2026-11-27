@@ -30,6 +30,8 @@ pub enum LlmErrorKind {
     Network,
     /// 已发起流请求，但在等待窗口内没有收到 provider 事件。
     StreamTimeout,
+    /// 思考阶段超过上限及宽限期，仍没有可用正文或工具调用。
+    ThinkingTimeout,
     /// 上下文超限 —— 靠压缩而不是重试解决。
     ContextWindow,
     /// 400 / 422 —— 请求本身非法（工具 schema、参数越界等）。重试无意义。
@@ -158,6 +160,9 @@ impl LlmErrorKind {
             return Self::ServerError;
         }
 
+        if lower.contains("thinking timeout") {
+            return Self::ThinkingTimeout;
+        }
         if lower.contains("stream idle timeout") {
             return Self::StreamTimeout;
         }
@@ -201,6 +206,7 @@ impl LlmErrorKind {
                 | Self::ServerError
                 | Self::Network
                 | Self::StreamTimeout
+                | Self::ThinkingTimeout
                 | Self::Unknown
         )
     }
@@ -211,8 +217,9 @@ impl LlmErrorKind {
     }
 
     /// 给 UI 和日志用的短标签。
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
+            Self::ThinkingTimeout => return crate::core::i18n::t1("llm.error.thinking_timeout"),
             Self::Auth => "Auth Error",
             Self::Quota => "Quota / Billing",
             Self::RateLimit => "Rate Limit",
@@ -224,11 +231,15 @@ impl LlmErrorKind {
             Self::BadRequest => "Bad Request",
             Self::Unknown => "Error",
         }
+        .to_string()
     }
 
     /// 下一步该做什么。终止类错误必须有，否则用户只看到一串状态码。
-    pub fn hint(self) -> Option<&'static str> {
+    pub fn hint(self) -> Option<String> {
         match self {
+            Self::ThinkingTimeout => {
+                return Some(crate::core::i18n::t1("llm.error.thinking_timeout_hint"));
+            }
             Self::Auth => Some(
                 "The API key was rejected. Check it with `/provider` or set STAR_API_KEY, \
                  then retry.",
@@ -265,6 +276,7 @@ impl LlmErrorKind {
             ),
             Self::Unknown => None,
         }
+        .map(str::to_string)
     }
 }
 
@@ -368,7 +380,7 @@ pub fn diagnose(error: &str) -> String {
     let kind = LlmErrorKind::classify(error);
     let mut out = format!("{}: ", kind.label());
     match kind.hint() {
-        Some(hint) => out.push_str(hint),
+        Some(hint) => out.push_str(&hint),
         None => out.push_str("The model call failed."),
     }
     let server = server_message(error);

@@ -730,6 +730,7 @@ pub async fn enqueue_user_input(
         // 清掉失败标志：这条消息不可能成功，`last_turn_failed` 再留着只会让 Esc
         // 继续无意义地重发（每次都撞回这里）。
         state.last_turn_failed = false;
+        state.active_retry_status = None;
         state.set_user_input(crate::types::UserInput {
             text: user_input,
             images,
@@ -877,6 +878,7 @@ pub async fn enqueue_user_input(
 
     // 新回合真的发出去了，之前那次失败不再是"当前状态"。
     state.last_turn_failed = false;
+    state.active_retry_status = None;
 
     let response_idx = state.chat_history.len() - 1;
     state.stream_targets.insert(message_id, response_idx);

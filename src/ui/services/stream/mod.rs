@@ -434,6 +434,33 @@ pub async fn handle_stream_update(
     update: StreamMessage,
     agent_tx: &mpsc::Sender<AgentRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 迟到的输出和状态不能复活已终结/取消的回合，也不能清掉新回合的重试提示。
+    let progress_id = match &update {
+        StreamMessage::Content { message_id, .. }
+        | StreamMessage::TextDelta { message_id, .. }
+        | StreamMessage::ReasoningDelta { message_id, .. }
+        | StreamMessage::Thinking { message_id, .. }
+        | StreamMessage::ToolCalls { message_id, .. }
+        | StreamMessage::RetryStatus { message_id, .. }
+        | StreamMessage::StatusUpdate { message_id, .. } => Some(*message_id),
+        _ => None,
+    };
+    if progress_id.is_some_and(|id| {
+        id != 0
+            && (state.active_message_id.is_some_and(|active| active != id)
+                || state.complete_task_message_ids.contains(&id)
+                || state.last_turn_failed
+                || state.cancelling_since.is_some())
+    }) {
+        return Ok(());
+    }
+    if matches!(&update,
+        StreamMessage::Done { message_id } | StreamMessage::Error { message_id, .. }
+            if *message_id != 0
+                && state.active_message_id.is_some_and(|active| active != *message_id)
+    ) {
+        return Ok(());
+    }
     match update {
         StreamMessage::ReloadTasks => {
             state.task_panel.reload();
@@ -511,6 +538,7 @@ pub async fn handle_stream_update(
                     .or_insert_with(|| model.clone());
             }
             if is_fresh_user_turn {
+                state.active_retry_status = None;
                 state.complete_task_message_ids.remove(&message_id);
                 state.auto_continued_message_ids.remove(&message_id);
                 state.response_costs.remove(&message_id);
@@ -605,7 +633,9 @@ pub async fn handle_stream_update(
             message_id,
             content,
         } => {
-            clear_stale_retry_status(state);
+            if !content.trim().is_empty() {
+                clear_stale_retry_status(state);
+            }
             handle_content_message(state, message_id, &content);
         }
         StreamMessage::TextDelta {
@@ -613,8 +643,10 @@ pub async fn handle_stream_update(
             content,
         } => {
             let content = sanitize_for_tui(&content);
-            state.last_token_time = Some(std::time::Instant::now());
-            clear_stale_retry_status(state);
+            if !content.trim().is_empty() {
+                state.last_token_time = Some(std::time::Instant::now());
+                clear_stale_retry_status(state);
+            }
             if let Some(&idx0) = state.stream_targets.get(&message_id) {
                 let mut idx = idx0;
                 if idx < state.chat_history.len() {
@@ -823,6 +855,7 @@ pub async fn handle_stream_update(
                     .is_some_and(|active| active != message_id)
                     || state.complete_task_message_ids.contains(&message_id)
                     || state.is_awaiting_confirmation
+                    || state.cancelling_since.is_some()
                     || state.last_turn_failed)
             {
                 append_transcript_event(state, &event, Some(message_id), payload);
@@ -881,7 +914,7 @@ pub async fn handle_stream_update(
                 }
                 "model_first_chunk" => {
                     state.model_wait_started_at = None;
-                    clear_stale_retry_status(state);
+                    // 首事件可能只是心跳；重试要等有效正文、思考或工具调用才算恢复。
                     // 双通道可能晚送首片段通知，只清模型阶段，不抹掉已开始的工具或错误。
                     let model_statuses = [
                         i18n::t1("ui.status.model_prepare"),
@@ -916,8 +949,14 @@ pub async fn handle_stream_update(
                         .trim();
                     if !msg.is_empty() {
                         state.last_token_time = Some(std::time::Instant::now());
-                        let status = i18n::t1("ui.status.agent").replace("{msg}", msg);
-                        emit_status_text(state, message_id, &status);
+                        if payload.get("phase").and_then(|v| v.as_str()) == Some("llm_retry")
+                            && payload.get("status").and_then(|v| v.as_str()) == Some("retrying")
+                        {
+                            state.active_retry_status = Some(msg.to_string());
+                        } else {
+                            let status = i18n::t1("ui.status.agent").replace("{msg}", msg);
+                            emit_status_text(state, message_id, &status);
+                        }
                     }
                 }
                 "auto_compact" => {
@@ -1364,6 +1403,7 @@ pub async fn handle_stream_update(
             content,
         } => {
             // /summary、/recap 旁路生成结果：作为独立助手条目展示（不进入主上下文）
+            state.active_retry_status = None;
             state.current_status_line = None;
             state.is_processing = false;
             let note = content.trim();
@@ -1558,6 +1598,12 @@ pub async fn handle_stream_update(
                 // Force scroll to bottom calculation in next render
             }
         }
+        StreamMessage::RetryStatus { status, .. } => {
+            if !state.is_awaiting_confirmation && !status.trim().is_empty() {
+                state.active_retry_status = Some(status);
+                state.last_token_time = Some(Instant::now());
+            }
+        }
         StreamMessage::StatusUpdate {
             message_id: _,
             status,
@@ -1707,6 +1753,7 @@ async fn handle_done_message(
         && has_tools
         && !state.auto_continued_message_ids.contains(&message_id);
     if can_auto_continue && !cancelling_graceful {
+        state.active_retry_status = None;
         state.auto_continue_remaining = state.auto_continue_remaining.saturating_sub(1);
         state.auto_continued_message_ids.insert(message_id);
         if let Some(idx) = assistant_idx {
@@ -1779,6 +1826,7 @@ fn finish_terminal_stream(state: &mut ChatState, message_id: u64, cancelling_gra
     // 回合结束（正常 Done 或错误）后，排队中的确认请求不可能再被回答；
     // 留着它们只会让下一轮收到新请求时把它们当成有效队列项。
     state.discard_pending_confirmation_queue(&i18n::t1("ui.confirm.cancelled_turn"));
+    state.active_retry_status = None;
     state.is_processing = false;
     state.current_tool_name = None;
     state.end_thinking();
@@ -1806,15 +1854,12 @@ async fn dequeue_pending_user_input(
     Ok(())
 }
 
-/// 模型开始输出时清掉已完成的分析阶段和挂着的重试文案。
+/// 有效正文、思考或工具调用到达时关闭独立重试提示。
 ///
-/// 重试状态的写入点（`agent_status` Trace 与 `StatusUpdate`）只负责"重试期间"
-/// 的展示；重试成功、模型重新开始输出后，没有人清 `current_status_line` ——
-/// 旧的 "Provider Error — retrying now (1/3)" 会一直挂在 spinner 行上，直到
-/// 回合结束被 "✓ Done" 覆盖。实测出现过正文已经流了 5 分钟、括号里还是 1/3
-/// 的情况。正文、思考或非空工具调用到达时调用这里：只清已结束的复杂度分析和
-/// 重试文案，保留确认、错误等其他状态。
+/// 同时兼容清理旧状态行中的重试/复杂度分析文案，不抹掉确认、错误等其他状态。
+/// 请求阶段或首个心跳不代表恢复，不能调用这里。
 fn clear_stale_retry_status(state: &mut ChatState) {
+    state.active_retry_status = None;
     const RETRY_MARKERS: [&str; 2] = ["— retrying now", "— retry"];
     let Some(status) = state.current_status_line.as_deref() else {
         return;

@@ -263,6 +263,7 @@ pub(crate) fn restore_session_history(
     state.auto_follow = true;
     state.is_streaming = false;
     state.is_processing = false;
+    state.active_retry_status = None;
     state.cancelling_since = None;
     state.last_turn_failed = false;
     state.last_code_block_content = None;
@@ -335,7 +336,8 @@ mod tests {
 
     #[test]
     fn restoring_history_resets_old_stream_and_tool_state() {
-        let mut state = crate::ui::state::ChatState::new();
+        let mut state = crate::ui::state::ChatState::test_fixture();
+        state.active_retry_status = Some("Retry 1/3".into());
         state.is_streaming = true;
         state.is_processing = true;
         state.active_message_id = Some(7);
@@ -363,6 +365,7 @@ mod tests {
         assert_eq!(state.chat_history.len(), 2);
         assert!(!state.is_streaming);
         assert!(!state.is_processing);
+        assert!(state.active_retry_status.is_none());
         assert!(state.active_message_id.is_none());
         assert!(state.stream_targets.is_empty());
         assert!(state.message_start_indices.is_empty());

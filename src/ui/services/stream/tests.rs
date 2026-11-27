@@ -1,6 +1,243 @@
 //! handle_stream_update 的测试。
 
 #[tokio::test]
+async fn retry_status_survives_request_phases_and_clears_on_usable_output() {
+    let (tx, _rx) = mpsc::channel(4);
+    let mut state = ChatState::test_fixture();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::Start {
+            message_id: 42,
+            kind: StreamStartKind::UserTurn {
+                model: "test".into(),
+            },
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    handle_stream_update(
+        &mut state,
+        StreamMessage::RetryStatus {
+            message_id: 42,
+            status: "Retry 1/3 in 2s — Network Error".into(),
+        },
+        &tx,
+    )
+    .await
+    .unwrap();
+    for event in [
+        "provider_request_started",
+        "provider_response_headers",
+        "provider_first_byte",
+        "model_first_chunk",
+    ] {
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Trace {
+                message_id: 42,
+                event: event.into(),
+                payload: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.active_retry_status.is_some(), "{event}");
+    }
+    for update in [
+        StreamMessage::TextDelta {
+            message_id: 42,
+            content: " \n".into(),
+        },
+        StreamMessage::ReasoningDelta {
+            message_id: 42,
+            content: "".into(),
+        },
+        StreamMessage::Thinking {
+            message_id: 42,
+            content: " ".into(),
+        },
+        StreamMessage::Content {
+            message_id: 42,
+            content: "".into(),
+        },
+        StreamMessage::ToolCalls {
+            message_id: 42,
+            tool_calls: vec![],
+        },
+    ] {
+        handle_stream_update(&mut state, update, &tx).await.unwrap();
+        assert!(state.active_retry_status.is_some());
+    }
+    for update in [
+        StreamMessage::TextDelta {
+            message_id: 42,
+            content: "answer".into(),
+        },
+        StreamMessage::ReasoningDelta {
+            message_id: 42,
+            content: "reasoning".into(),
+        },
+        StreamMessage::Thinking {
+            message_id: 42,
+            content: "thinking".into(),
+        },
+        StreamMessage::Content {
+            message_id: 42,
+            content: "answer".into(),
+        },
+        StreamMessage::ToolCalls {
+            message_id: 42,
+            tool_calls: vec![agent_tool_call()],
+        },
+    ] {
+        handle_stream_update(&mut state, StreamMessage::Trace {
+            message_id: 42, event: "agent_status".into(), payload: serde_json::json!({
+                "phase": "llm_retry", "status": "retrying", "message": "Retrying 2/3 — Thinking Timeout",
+            }),
+        }, &tx).await.unwrap();
+        assert_eq!(
+            state.active_retry_status.as_deref(),
+            Some("Retrying 2/3 — Thinking Timeout")
+        );
+        handle_stream_update(&mut state, update, &tx).await.unwrap();
+        assert!(state.active_retry_status.is_none());
+    }
+}
+
+#[tokio::test]
+async fn retry_status_finishes_and_late_progress_cannot_revive_it() {
+    let (tx, _rx) = mpsc::channel(4);
+    for terminal in [
+        StreamMessage::Done { message_id: 42 },
+        StreamMessage::Error {
+            message_id: 42,
+            error: "connection refused".into(),
+        },
+    ] {
+        let mut state = ChatState::test_fixture();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id: 42,
+                kind: StreamStartKind::UserTurn {
+                    model: "test".into(),
+                },
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        state.active_retry_status = Some("retry".into());
+        handle_stream_update(&mut state, terminal, &tx)
+            .await
+            .unwrap();
+        assert!(state.active_retry_status.is_none());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::RetryStatus {
+                message_id: 42,
+                status: "late retry".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Trace {
+                message_id: 42,
+                event: "agent_status".into(),
+                payload: serde_json::json!({
+                    "phase": "llm_retry", "status": "retrying", "message": "late retry",
+                }),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.active_retry_status.is_none());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id: 43,
+                kind: StreamStartKind::UserTurn {
+                    model: "test".into(),
+                },
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        state.active_retry_status = Some("new retry".into());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::TextDelta {
+                message_id: 42,
+                content: "late output".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.active_retry_status.as_deref(), Some("new retry"));
+        for late_terminal in [
+            StreamMessage::Done { message_id: 41 },
+            StreamMessage::Error {
+                message_id: 41,
+                error: "late failure".into(),
+            },
+        ] {
+            handle_stream_update(&mut state, late_terminal, &tx)
+                .await
+                .unwrap();
+            assert_eq!(state.active_retry_status.as_deref(), Some("new retry"));
+            assert_eq!(state.active_message_id, Some(43));
+            assert!(state.is_processing);
+        }
+        handle_stream_update(
+            &mut state,
+            StreamMessage::Start {
+                message_id: 44,
+                kind: StreamStartKind::UserTurn {
+                    model: "test".into(),
+                },
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.active_retry_status.is_none());
+        state.cancelling_since = Some(Instant::now());
+        handle_stream_update(
+            &mut state,
+            StreamMessage::RetryStatus {
+                message_id: 44,
+                status: "cancelled retry".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.active_retry_status.is_none());
+        state.cancelling_since = None;
+        state.is_awaiting_confirmation = true;
+        handle_stream_update(
+            &mut state,
+            StreamMessage::RetryStatus {
+                message_id: 44,
+                status: "hidden by approval".into(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(state.active_retry_status.is_none());
+    }
+}
+
+#[tokio::test]
 async fn background_stop_result_reports_success_finished_and_failure() {
     let (agent_tx, _agent_rx) = mpsc::channel(2);
     let mut state = ChatState::test_fixture();
@@ -2292,7 +2529,11 @@ async fn approved_bash_failure_preserves_output_and_failure_marker() {
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(text.contains("Allowed once"), "{text}");
+    assert!(
+        crate::ui::components::chat_history::render_entry_lines(&state, 1, 92).is_empty(),
+        "单次放行不应留下回执或空白行"
+    );
+    assert!(!text.contains("Allowed once"), "{text}");
     assert!(
         !text.contains('✓'),
         "approval must not look like execution success: {text}"
@@ -2303,7 +2544,7 @@ async fn approved_bash_failure_preserves_output_and_failure_marker() {
 }
 
 #[tokio::test]
-async fn approved_multi_edit_history_shows_the_target_and_resolved_decision() {
+async fn approved_multi_edit_history_shows_target_without_once_receipt() {
     let mut state = ChatState::test_fixture();
     state.chat_history.clear();
     let (tx, _rx) = mpsc::channel(4);
@@ -2372,7 +2613,7 @@ async fn approved_multi_edit_history_shows_the_target_and_resolved_decision() {
         .collect();
     assert!(text.contains("UddTaskController.java"), "{text}");
     assert!(
-        text.contains(&crate::core::i18n::t1("ui.confirm.outcome.once")),
+        !text.contains(&crate::core::i18n::t1("ui.confirm.outcome.once")),
         "{text}"
     );
     assert!(!text.contains("no path provided"), "{text}");
