@@ -14,10 +14,10 @@ pub use legacy::{PermissionHit, SessionPermissionManager};
 /// Legacy permission types for backward compatibility
 pub mod legacy {
     use serde_json::Value;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::io::{self, Write};
     use std::path::PathBuf;
-    use std::sync::{Mutex, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum PermissionHit {
@@ -32,6 +32,8 @@ pub mod legacy {
     pub struct SessionPermissionManager {
         allowed_actions: RwLock<HashSet<String>>,
         allowed_tools: RwLock<HashSet<String>>,
+        /// 同一授权身份的门禁串行决策，实际工具执行仍可并行。
+        approval_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
         persisted: Mutex<PersistedGrants>,
         persist_path: Option<PathBuf>,
     }
@@ -54,6 +56,20 @@ pub mod legacy {
                 persist_path: Some(path),
                 ..Self::default()
             }
+        }
+
+        /// 与授权缓存共用生命周期，跨执行器/子代理也不能提前发出重复确认。
+        pub(crate) fn approval_lock(
+            &self,
+            tool_name: &str,
+            identity: Option<&str>,
+        ) -> Arc<tokio::sync::Mutex<()>> {
+            self.approval_locks
+                .lock()
+                .expect("approval lock map poisoned")
+                .entry(identity.unwrap_or(tool_name).to_string())
+                .or_default()
+                .clone()
         }
 
         pub fn allow_action(&self, tool_name: &str, args: &Value) {
@@ -248,6 +264,30 @@ pub mod legacy {
 mod tests {
     use super::legacy::SessionPermissionManager;
     use std::path::PathBuf;
+
+    #[test]
+    fn approval_locks_follow_grant_identity_and_manager_scope() {
+        use std::sync::Arc;
+        let manager = SessionPermissionManager::new();
+        let lock = manager.approval_lock("Read", Some("plugin:a"));
+        assert!(Arc::ptr_eq(
+            &lock,
+            &manager.approval_lock("Read", Some("plugin:a"))
+        ));
+        assert!(!Arc::ptr_eq(
+            &lock,
+            &manager.approval_lock("Read", Some("plugin:b"))
+        ));
+        assert!(!Arc::ptr_eq(&lock, &manager.approval_lock("Read", None)));
+        assert!(!Arc::ptr_eq(
+            &manager.approval_lock("Read", None),
+            &manager.approval_lock("Write", None),
+        ));
+        assert!(!Arc::ptr_eq(
+            &lock,
+            &SessionPermissionManager::new().approval_lock("Read", Some("plugin:a")),
+        ));
+    }
 
     /// 回归：点一次"总是允许"不能摧毁手写的权限规则。
     ///

@@ -429,14 +429,8 @@ async fn handle_suggestion_overlay(
         return Ok(false);
     };
     match action {
-        UiAction::SelectPrev => {
-            crate::ui::services::suggestions::handle_up(state);
-            Ok(true)
-        }
-        UiAction::SelectNext => {
-            crate::ui::services::suggestions::handle_down(state);
-            Ok(true)
-        }
+        UiAction::SelectPrev => Ok(crate::ui::services::suggestions::handle_up(state)),
+        UiAction::SelectNext => Ok(crate::ui::services::suggestions::handle_down(state)),
         UiAction::AcceptSuggestion => {
             if !crate::ui::services::suggestions::handle_enter(state) {
                 return Ok(false);
@@ -2168,6 +2162,69 @@ mod tests {
                 assert!(state.command_hints.is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn argument_help_enter_submits_original_command_and_arrows_reach_history() {
+        let _project = crate::ui::test_support::TestProject::new();
+        for text in [
+            "/loop ",
+            "/loop 分析项目",
+            "/goal ",
+            "/goal 分析项目",
+            "/chat sa",
+        ] {
+            let mut state = ChatState::test_fixture();
+            state.is_processing = true;
+            state.set_input_text(text);
+            crate::ui::services::suggestions::on_input_changed(&mut state);
+            let (tx, mut rx) = mpsc::channel(8);
+            handle_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &tx,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(state.input.is_empty(), "first Enter must submit: {text}");
+            let queued = state.pending_user_messages.pop_front().unwrap();
+            assert_eq!(queued.text, text);
+            assert_eq!(queued.intent, crate::types::InputIntent::CommandEligible);
+            assert!(state.pending_user_messages.is_empty());
+            assert!(rx.try_recv().is_err());
+        }
+
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("/model ");
+        state.available_models = vec!["fixture-model".into()];
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        let (tx, _rx) = mpsc::channel(8);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(state.input.is_empty());
+        assert!(state.is_palette_open());
+        assert_eq!(state.palette_mode, PaletteMode::Model);
+
+        let mut state = ChatState::test_fixture();
+        state.command_history.push_front("earlier prompt".into());
+        state.set_input_text("/loop ");
+        crate::ui::services::suggestions::on_input_changed(&mut state);
+        handle_key_event(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &tx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.input, "earlier prompt");
     }
 
     #[tokio::test]

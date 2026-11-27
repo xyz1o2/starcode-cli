@@ -5,4 +5,4 @@
   3│                                                                                                    │
 
 ─── styles ───
-  0│0-99 fg:gray,bg:black│
+  0│0-99 fg:rgb(80,80,80),bg:black│

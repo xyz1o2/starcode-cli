@@ -307,7 +307,10 @@ fn render_command_hints_overlay(
     }
     if state.command_hints.is_empty() {
         if input_area.y > f.area().y && input_area.width > 0 {
-            if let Some(hint) = crate::commands::system::command_argument_hint(&state.input) {
+            if let Some(hint) = crate::commands::system::command_argument_hint_with_plugins(
+                &state.input,
+                state.plugin_commands.candidates(),
+            ) {
                 let area = Rect::new(input_area.x, input_area.y - 1, input_area.width, 1);
                 f.render_widget(Clear, area);
                 f.render_widget(
@@ -315,7 +318,7 @@ fn render_command_hints_overlay(
                         &hint,
                         area.width as usize,
                     ))
-                    .style(Style::default().fg(theme.secondary).bg(theme.background)),
+                    .style(theme.subtle_style().bg(theme.background)),
                     area,
                 );
             }
@@ -500,6 +503,52 @@ mod geometry_tests {
     }
 
     #[test]
+    fn argument_help_is_a_single_muted_line_without_a_default_selection() {
+        let mut state = ChatState::test_fixture();
+        state.plugin_commands.seed_for_tests(vec![
+            crate::commands::system::PluginCommandCandidate {
+                name: "fixture-check".into(),
+                description: "Inspect fixture metadata".into(),
+            },
+        ]);
+        for input in [
+            "/loop ",
+            "/loop 分析项目",
+            "/goal ",
+            "/goal 分析项目",
+            "/model ",
+            "/chat sa",
+            "/fixture-check args",
+        ] {
+            state.set_input_text(input);
+            suggestions::on_input_changed(&mut state);
+            assert!(state.command_hints.is_empty(), "input={input}");
+            let theme = state.theme_manager.current();
+            let mut terminal = Terminal::new(TestBackend::new(120, 5)).unwrap();
+            terminal
+                .draw(|f| {
+                    render_command_hints_overlay(f, &state, Rect::new(0, 2, 120, 3), theme);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (0..120).map(|x| buffer[(x, 1)].symbol()).collect();
+            assert!(row.starts_with('/'), "input={input}: {row}");
+            for y in 0..5 {
+                for x in 0..120 {
+                    let cell = &buffer[(x, y)];
+                    if y == 1 {
+                        assert_eq!(cell.fg, theme.subtle, "input={input}");
+                        assert_eq!(cell.bg, theme.background, "input={input}");
+                        assert!(!cell.modifier.contains(Modifier::BOLD), "input={input}");
+                    } else {
+                        assert_eq!(cell.symbol(), " ", "no selectable list: {input}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn centered_popup_stays_inside_even_tiny_areas() {
         for width in 0..=80 {
             for height in 0..=24 {
@@ -544,7 +593,8 @@ mod screenshot_regressions {
             assert!(hint.contains("[session]"), "{hint}");
         }
         assert!(crate::commands::system::command_argument_hint("/resum").is_none());
-        assert!(crate::commands::system::command_argument_hint("/chat ").is_none());
+        let parent_hint = crate::commands::system::command_argument_hint("/chat ").unwrap();
+        assert!(parent_hint.contains("save") && parent_hint.contains("resume"));
         assert!(!crate::commands::system::get_command_hints("/chat ").is_empty());
     }
     #[test]

@@ -684,22 +684,29 @@ impl ToolExecutor {
         }
     }
 
-    /// 门禁：这次工具调用能不能往下走。
-    ///
-    /// 只有两种结局，**没有第三种**。尤其没有"等太久了就当拒绝"：等待时长由
-    /// 用户决定，不由计时器决定（真正的等待在 [`MessageBus::await_tool_decision`]，
-    /// 它没有超时）。
-    ///
-    /// registry 之外的工具（MCP 管理工具 / `mcp__<server>__<tool>` 动态工具）
-    /// 的门禁 —— 与 [`Self::pass_gate`] 平级，但走的是轻量路径：没有工具实体
-    /// （`should_confirm_execute` / `permission_cache_identity` 都拿不到），
-    /// 只做「策略 verdict + 用户确认」两步。
-    ///
-    /// 之前这两个分支完全不设门 —— `McpRestartServer`（重开 server 连接）和
-    /// 任意远端 `mcp__` 工具都是一声不吭直接执行的。管理工具里多数是
-    /// 只读（列表/读资源），靠 `is_tool_read_only` 的硬编码名单放行；剩下的
-    /// （Restart / 动态工具）每次都问。会话授权（「本会话允许」）对动态工具
-    /// 按签名记录 —— 用户对同一个 server+tool 点过「总是允许」后就不再重复问。
+    /// 同一授权身份先完成决策和授权写入，后续调用再读缓存；锁不覆盖工具执行。
+    /// 等锁与等用户确认一样没有超时，但必须响应当前回合的中断。
+    async fn lock_approval(
+        &self,
+        tool_name: &str,
+        identity: Option<&str>,
+        abort_signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, crate::core::confirmation_bus::DecisionWaitError>
+    {
+        let lock = self.permission_manager.approval_lock(tool_name, identity);
+        let Some(token) = abort_signal else {
+            return Ok(lock.lock_owned().await);
+        };
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(crate::core::confirmation_bus::DecisionWaitError::Aborted),
+            guard = lock.lock_owned() => Ok(guard),
+        }
+    }
+
+    /// 注册表外工具的门禁：策略检查、用户确认及授权写入。
+    /// 没有工具实体可做逐次检查；会话/持久授权按完整工具名隔离。
+    /// 确认等待没有超时，只有批准、拒绝或中断等明确结局。
     async fn pass_gate_registryless(
         &self,
         tool_name: &str,
@@ -716,6 +723,10 @@ impl ToolExecutor {
             return Gate::Open;
         };
 
+        let _approval_guard = match self.lock_approval(tool_name, None, abort_signal).await {
+            Ok(guard) => guard,
+            Err(error) => return Gate::Closed(error.to_string()),
+        };
         let mut requires_prompt = false;
         let mut policy_requires_confirmation = false;
         let mut approved = false;
@@ -919,6 +930,16 @@ impl ToolExecutor {
             originating_tool_call_id,
             abort_signal,
         } = input;
+
+        // 必须在读取 grant 和 Auto 分类前取锁，并持有到 record_approval 完成。
+        // 否则并发调用会在用户按 2/3 之前全部生成确认卡，旧卡不会消费新授权。
+        let _approval_guard = match self
+            .lock_approval(tool_name, permission_identity, abort_signal)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => return Gate::Closed(error.to_string()),
+        };
 
         // 策略引擎要求弹窗时（`ask` 规则命中），必须真的走到用户面前。
         // 工具自己的 `should_confirm_execute` 返回 `Ok(None)` 只表示
@@ -5307,6 +5328,197 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// 并发门禁必须在前一张卡写入授权后重查，不能提前排队多张同工具确认。
+    #[tokio::test]
+    async fn auto_concurrent_gates_reuse_session_and_persisted_grants() {
+        use crate::core::auto_mode::service::{mock_classifier, AutoVerdict};
+        use crate::core::config::{ConfigParameters, RuntimeServices};
+        use crate::core::policy::{PolicyEngine, PolicyEngineConfig};
+        use crate::core::state::GlobalState;
+        use crate::core::tools::tools::BaseDeclarativeTool;
+        use crate::types::ToolConfirmationOutcome;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for registered in [false, true] {
+            for (outcome, explicit_ask, expected) in [
+                (ToolConfirmationOutcome::AllowSession, false, 1),
+                (ToolConfirmationOutcome::ProceedAlwaysAndSave, false, 1),
+                (ToolConfirmationOutcome::ProceedOnce, false, 3),
+                (ToolConfirmationOutcome::AllowSession, true, 3),
+                (ToolConfirmationOutcome::ProceedAlwaysAndSave, true, 3),
+            ] {
+                let temp = tempfile::tempdir().expect("test directory");
+                let mut config = Config::new(ConfigParameters {
+                    target_dir: temp.path().to_path_buf(),
+                    cwd: temp.path().to_path_buf(),
+                    ..Default::default()
+                });
+                let mut policy = PolicyEngine::new(PolicyEngineConfig {
+                    approval_mode: Some(crate::core::policy::types::ApprovalMode::Auto),
+                    ..Default::default()
+                });
+                policy.set_auto_classifier(
+                    mock_classifier(vec![
+                        AutoVerdict::Ask {
+                            reason: "test classifier asks".into(),
+                        };
+                        3
+                    ]),
+                    None,
+                );
+                if explicit_ask {
+                    use crate::core::policy::settings_rules::{
+                        PermissionRuleSpec, SettingsPermissions,
+                    };
+                    let name = if registered {
+                        "ReconfirmingTool"
+                    } else {
+                        "mcp__fixture__write"
+                    };
+                    let mut permissions = SettingsPermissions::default();
+                    permissions
+                        .ask
+                        .push(PermissionRuleSpec::parse(name).unwrap());
+                    policy.set_settings_permissions(permissions);
+                }
+                let bus = Arc::new(MessageBus::new(policy, false));
+                config.install_runtime_services(RuntimeServices::new(
+                    None,
+                    bus.clone(),
+                    None,
+                    Arc::new(GlobalState::new()),
+                ));
+                let config = Arc::new(config);
+                let registry = Arc::new(ToolRegistry::new(config.clone()));
+                // 模拟跨回合/子代理重建执行器，门禁锁必须跟随共享授权管理器。
+                let executors: Vec<_> = (0..2)
+                    .map(|_| {
+                        ToolExecutor::new(
+                            StarClient::new("", None, None, None, None),
+                            registry.clone(),
+                            Some(bus.clone()),
+                            config.clone(),
+                        )
+                    })
+                    .collect();
+                assert!(Arc::ptr_eq(
+                    &executors[0].permission_manager,
+                    &executors[1].permission_manager,
+                ));
+                let prompts = Arc::new(AtomicUsize::new(0));
+                let observed = prompts.clone();
+                let mut rx = bus.subscribe();
+                let response_bus = bus.clone();
+                let selected = outcome.clone();
+                let responder = tokio::spawn(async move {
+                    while let Ok(message) = rx.recv().await {
+                        if let Message::ToolConfirmationRequest(request) = message {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            // 让其他并发调用进入门禁，稳定重现授权写入前就排队的情况。
+                            tokio::task::yield_now().await;
+                            response_bus
+                                .publish(Message::ToolConfirmationResponse(
+                                    ToolConfirmationResponse::from_user_decision(
+                                        request.correlation_id,
+                                        selected.clone(),
+                                        None,
+                                    ),
+                                ))
+                                .await
+                                .expect("approval response");
+                        }
+                    }
+                });
+                let tool = ReconfirmingTool {
+                    runs: Arc::new(AtomicUsize::new(0)),
+                };
+                let gate = |n: usize| {
+                    let executor = &executors[n % executors.len()];
+                    let tool = &tool;
+                    async move {
+                        let args = json!({"value": n});
+                        let id = format!("concurrent-{n}");
+                        if registered {
+                            let invocation = tool.create_invocation(args.clone()).unwrap();
+                            executor
+                                .pass_gate(GateInput {
+                                    tool_name: tool.name(),
+                                    args: &args,
+                                    tool,
+                                    invocation: invocation.as_ref(),
+                                    permission_identity: None,
+                                    requires_invocation_confirmation: true,
+                                    originating_tool_call_id: &id,
+                                    abort_signal: None,
+                                })
+                                .await
+                        } else {
+                            executor
+                                .pass_gate_registryless("mcp__fixture__write", &args, &id, None)
+                                .await
+                        }
+                    }
+                };
+                let results = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    futures::future::join_all((0..3).map(gate)),
+                )
+                .await
+                .expect("all gates resolve");
+                responder.abort();
+                assert!(results.iter().all(|gate| matches!(gate, Gate::Open)));
+                assert_eq!(
+                    prompts.load(Ordering::SeqCst),
+                    expected,
+                    "registered={registered}, outcome={outcome:?}, explicit_ask={explicit_ask}"
+                );
+                assert_eq!(
+                    bus.auto_classifier_stats().await.total_classifications,
+                    if explicit_ask { 0 } else { expected as u64 },
+                    "a cached grant must precede Auto classification"
+                );
+            }
+        }
+    }
+
+    /// 等待前一个门禁时也要响应中断，且不能拦住其他工具的门禁。
+    #[tokio::test]
+    async fn queued_approval_is_cancellable_and_does_not_block_other_tools() {
+        let (executor, bus, _) = counting_gate();
+        let mut messages = bus.subscribe();
+        let held = executor
+            .lock_approval("mcp__fixture__write", None, None)
+            .await
+            .unwrap();
+        let other = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            executor.lock_approval("mcp__fixture__other", None, None),
+        )
+        .await
+        .expect("unrelated tools must not wait")
+        .unwrap();
+        drop(other);
+        let token = tokio_util::sync::CancellationToken::new();
+        let args = json!({"value": 1});
+        let waiting =
+            executor.pass_gate_registryless("mcp__fixture__write", &args, "queued", Some(&token));
+        let interrupt = async {
+            tokio::task::yield_now().await;
+            token.cancel();
+        };
+        let (gate, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(waiting, interrupt)
+        })
+        .await
+        .expect("interrupt must release the queued gate");
+        assert!(matches!(gate, Gate::Closed(_)));
+        assert!(matches!(
+            messages.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        drop(held);
     }
 
     #[tokio::test]

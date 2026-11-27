@@ -126,6 +126,16 @@ pub fn on_input_changed(state: &mut ChatState) {
     refresh_command_hints(state);
 }
 
+/// 完整命令名后的参数或子命令输入只显示用法，不自动接受候选。
+fn is_command_argument_input(state: &ChatState) -> bool {
+    state.input.chars().any(char::is_whitespace)
+        || crate::commands::system::command_argument_hint_with_plugins(
+            &state.input,
+            state.plugin_commands.candidates(),
+        )
+        .is_some()
+}
+
 pub(crate) fn refresh_command_hints(state: &mut ChatState) {
     if state.input_intent == crate::types::InputIntent::CommandEligible
         && state.input.starts_with('/')
@@ -133,10 +143,14 @@ pub(crate) fn refresh_command_hints(state: &mut ChatState) {
         && !should_suppress_hints(state)
     {
         state.show_command_hints = true;
-        state.command_hints = crate::commands::system::get_command_hints_with_plugins(
-            &state.input,
-            state.plugin_commands.candidates(),
-        );
+        state.command_hints = if is_command_argument_input(state) {
+            Vec::new()
+        } else {
+            crate::commands::system::get_command_hints_with_plugins(
+                &state.input,
+                state.plugin_commands.candidates(),
+            )
+        };
         state.selected_hint = 0;
     } else {
         state.show_command_hints = false;
@@ -299,6 +313,11 @@ pub fn handle_enter(state: &mut ChatState) -> bool {
         return true;
     }
 
+    // 参数提示不参与接受动作，完整命令必须原样交给提交分流。
+    if state.show_command_hints && is_command_argument_input(state) {
+        state.plugin_commands.inline_selection_lost = false;
+        return false;
+    }
     if state.show_command_hints && state.plugin_commands.inline_selection_lost {
         state.plugin_commands.inline_selection_lost = false;
         return true;
@@ -338,12 +357,34 @@ pub fn handle_tab(state: &mut ChatState) -> bool {
         return true;
     }
 
-    if state.show_command_hints && state.plugin_commands.inline_selection_lost {
+    let argument_input = is_command_argument_input(state);
+    if state.show_command_hints && argument_input {
+        state.plugin_commands.inline_selection_lost = false;
+    } else if state.show_command_hints && state.plugin_commands.inline_selection_lost {
         state.plugin_commands.inline_selection_lost = false;
         return true;
     }
-    if state.show_command_hints && !state.command_hints.is_empty() {
-        let Some(selected) = state.command_hints.get(state.selected_hint) else {
+    // 参数阶段只在显式 Tab 时查询候选，不把子命令放进默认选中列表。
+    let explicit_hints = if state.show_command_hints && argument_input {
+        crate::commands::system::get_command_hints_with_plugins(
+            &state.input,
+            state.plugin_commands.candidates(),
+        )
+    } else {
+        Vec::new()
+    };
+    let hints = if argument_input {
+        &explicit_hints
+    } else {
+        &state.command_hints
+    };
+    if state.show_command_hints && !hints.is_empty() {
+        let index = if argument_input {
+            0
+        } else {
+            state.selected_hint
+        };
+        let Some(selected) = hints.get(index) else {
             return true;
         };
         let cmd_text = extract_hint_primary_text(selected);
@@ -626,18 +667,97 @@ mod tests {
 
     #[test]
     fn empty_command_queries_still_offer_completions() {
-        for input in ["/", "/mcp "] {
+        for input in ["/", "/mc"] {
             let mut state = ChatState::test_fixture();
             state.set_input_text(input);
             on_input_changed(&mut state);
             assert!(state.show_command_hints, "input={input}");
             assert!(!state.command_hints.is_empty(), "input={input}");
+            let palette = crate::commands::system::command_palette_items(input);
             assert!(
-                crate::commands::system::command_palette_items(input)
-                    .iter()
-                    .all(|item| item.label.starts_with(input)),
-                "completion paths must preserve their command level: {input}"
+                palette.iter().all(|item| item.label.starts_with('/')),
+                "completion entries must remain slash commands: {input}"
             );
+            if input == "/mc" {
+                assert!(palette.iter().any(|item| item.label == "/mcp"));
+            }
+        }
+
+        let mut state = ChatState::test_fixture();
+        state.set_input_text("/mcp ");
+        on_input_changed(&mut state);
+        assert!(state.show_command_hints);
+        assert!(state.command_hints.is_empty());
+        assert!(!crate::commands::system::get_command_hints("/mcp ").is_empty());
+    }
+
+    #[test]
+    fn complete_builtin_names_and_aliases_never_require_accepting_arguments() {
+        let mut state = ChatState::test_fixture();
+        for command in crate::commands::system::ALL_COMMANDS {
+            for name in std::iter::once(command.name).chain(command.alt_names.iter().copied()) {
+                for suffix in ["", " ", " 分析项目"] {
+                    let input = format!("/{name}{suffix}");
+                    state.set_input_text(&input);
+                    on_input_changed(&mut state);
+                    assert!(state.show_command_hints, "input={input}");
+                    assert!(state.command_hints.is_empty(), "input={input}");
+                    assert!(!handle_up(&mut state), "input={input}");
+                    assert!(!handle_down(&mut state), "input={input}");
+                    // 后台刷新遗留的选择失效标记也不能拦截完整命令的提交。
+                    state.plugin_commands.inline_selection_lost = true;
+                    assert!(!handle_enter(&mut state), "input={input}");
+                    assert_eq!(state.input, input);
+                    assert_eq!(state.textarea.lines().join("\n"), input);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_tab_completes_subcommands_but_enter_keeps_partial_arguments() {
+        for (input, completed) in [
+            ("/loop ", "/loop add"),
+            ("/loop a", "/loop add"),
+            ("/chat ", "/chat save"),
+            ("/chat sa", "/chat save"),
+            ("/remember ad", "/remember add"),
+            ("/model us", "/model use"),
+        ] {
+            let mut state = ChatState::test_fixture();
+            state.set_input_text(input);
+            on_input_changed(&mut state);
+            assert!(state.command_hints.is_empty(), "input={input}");
+            assert!(!handle_enter(&mut state), "input={input}");
+            assert_eq!(state.input, input);
+            assert!(handle_tab(&mut state), "input={input}");
+            assert_eq!(state.input, completed);
+            assert_eq!(state.textarea.lines().join("\n"), completed);
+            assert!(state.command_hints.is_empty());
+            assert!(!handle_enter(&mut state));
+        }
+    }
+
+    #[test]
+    fn complete_plugin_commands_keep_arguments_and_do_not_consume_enter() {
+        let mut state = ChatState::test_fixture();
+        state.plugin_commands.seed_for_tests(vec![
+            crate::commands::system::PluginCommandCandidate {
+                name: "fixture-check".into(),
+                description: "Inspect fixture metadata".into(),
+            },
+        ]);
+        for input in [
+            "/fixture-check",
+            "/fixture-check ",
+            "/fixture-check 分析项目",
+        ] {
+            state.set_input_text(input);
+            on_input_changed(&mut state);
+            assert!(state.command_hints.is_empty());
+            assert!(!handle_enter(&mut state));
+            assert_eq!(state.input, input);
+            assert_eq!(state.textarea.lines().join("\n"), input);
         }
     }
 

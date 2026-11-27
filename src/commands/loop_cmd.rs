@@ -30,9 +30,22 @@ pub enum LoopCommand {
     Resume { name: String },
 }
 
+const DEFAULT_INTERVAL_MINUTES: u64 = 10;
+
+/// 管理入口保留严格解析；其余文本直接创建任务，避免把自然语言误当子命令。
 fn parse_command(args: Vec<String>) -> Result<Option<LoopCommand>, String> {
-    if args.is_empty() {
+    let Some(first) = args.first() else {
         return Ok(Some(LoopCommand::List));
+    };
+    if first == "--" {
+        return parse_prompt(args.into_iter().skip(1).collect()).map(Some);
+    }
+    if !matches!(
+        first.as_str(),
+        "add" | "list" | "pause" | "resume" | "remove" | "help"
+    ) && !first.starts_with('-')
+    {
+        return parse_prompt(args).map(Some);
     }
     let command = LoopCommand::augment_subcommands(clap::Command::new("loop"));
     match command.try_get_matches_from(std::iter::once("loop".to_string()).chain(args)) {
@@ -42,6 +55,18 @@ fn parse_command(args: Vec<String>) -> Result<Option<LoopCommand>, String> {
         Err(error) if matches!(error.kind(), clap::error::ErrorKind::DisplayHelp) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// 简写复用显式 add 的持久化与反馈路径，名称不依赖提示词内容。
+fn parse_prompt(prompt: Vec<String>) -> Result<LoopCommand, String> {
+    if prompt.join(" ").trim().is_empty() {
+        return Err(i18n::t1("cmd.loop.empty_prompt"));
+    }
+    Ok(LoopCommand::Add {
+        name: format!("loop-{}", uuid::Uuid::new_v4().simple()),
+        every_minutes: DEFAULT_INTERVAL_MINUTES,
+        prompt,
+    })
 }
 
 pub async fn run(ctx: CommandContext<'_>, args: Vec<String>) -> CommandResult {
@@ -234,6 +259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = run_in(dir.path(), LoopCommand::List).await.unwrap();
         assert!(out.contains("No /loop tasks"), "{out}");
+        assert!(out.contains("/loop <prompt...>"), "{out}");
         assert!(
             out.contains("/loop add <name> <minutes> <prompt...>"),
             "{out}"
@@ -342,7 +368,9 @@ mod tests {
     #[test]
     fn parser_rejects_missing_extra_and_invalid_arguments() {
         for args in [
-            vec!["unknown"],
+            vec!["--unknown"],
+            vec!["--"],
+            vec!["--", "  "],
             vec!["add"],
             vec!["add", "name", "1"],
             vec!["add", "name", "-1", "prompt"],
@@ -354,6 +382,52 @@ mod tests {
             vec!["remove", "name", "extra"],
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_prompt_creates_an_automatically_named_task_without_selecting_a_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = parse(&["分析项目"]).unwrap().unwrap();
+        let out = run_in(dir.path(), command).await.unwrap();
+        let tasks = crate::core::loops::list_tasks(dir.path()).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].prompt, "分析项目");
+        assert_eq!(tasks[0].interval_minutes, DEFAULT_INTERVAL_MINUTES);
+        assert!(tasks[0].name.starts_with("loop-"));
+        assert!(out.contains(&tasks[0].name), "{out}");
+        assert!(out.contains("every 10 minutes"), "{out}");
+        assert!(tasks[0].next_run_at >= tasks[0].created_at + 600);
+
+        run_in(dir.path(), parse(&["分析项目"]).unwrap().unwrap())
+            .await
+            .unwrap();
+        let tasks = crate::core::loops::list_tasks(dir.path()).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_ne!(tasks[0].name, tasks[1].name);
+    }
+
+    #[test]
+    fn plain_prompt_preserves_flags_and_explicit_literal_reserved_words() {
+        for (args, expected) in [
+            (
+                vec!["run", "cargo", "test", "--lib"],
+                "run cargo test --lib",
+            ),
+            (vec!["--", "list", "the", "changes"], "list the changes"),
+            (vec!["--", "--help"], "--help"),
+        ] {
+            let command = parse(&args).unwrap().unwrap();
+            let LoopCommand::Add {
+                every_minutes,
+                prompt,
+                ..
+            } = command
+            else {
+                panic!("expected a task for {args:?}");
+            };
+            assert_eq!(every_minutes, DEFAULT_INTERVAL_MINUTES);
+            assert_eq!(prompt.join(" "), expected);
         }
     }
 

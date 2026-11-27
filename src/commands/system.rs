@@ -201,7 +201,7 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "loop",
         alt_names: &[],
-        description: "Run recurring prompts on a schedule",
+        description: "Run /loop <prompt> every 10 minutes, or manage named scheduled tasks",
         category: "Automation",
         sub_commands: &[
             SlashCommand {
@@ -1070,7 +1070,29 @@ pub const ALL_COMMANDS: &[SlashCommand] = &[
         alt_names: &["model"],
         description: "Switch model",
         category: "Configuration",
-        sub_commands: &[],
+        sub_commands: &[
+            SlashCommand {
+                name: "list",
+                alt_names: &[],
+                description: "List available models",
+                category: "Configuration",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "use",
+                alt_names: &[],
+                description: "Select a model by name",
+                category: "Configuration",
+                sub_commands: &[],
+            },
+            SlashCommand {
+                name: "help",
+                alt_names: &[],
+                description: "Show model command help",
+                category: "Configuration",
+                sub_commands: &[],
+            },
+        ],
     },
     SlashCommand {
         name: "lang",
@@ -2795,54 +2817,62 @@ pub fn command_palette_items(input: &str) -> Vec<crate::ui::state::PaletteItem> 
         .collect()
 }
 
-/// 已到叶子命令时显示用法，不把参数占位符加入可接受的补全项。
+/// 命令名完整后显示最近匹配节点的用法，参数和子命令都只是说明，不进入默认选中列表。
 pub fn command_argument_hint(input: &str) -> Option<String> {
-    let parts: Vec<String> = input
-        .strip_prefix('/')?
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
     let mut current = ALL_COMMANDS;
     let mut path = Vec::new();
-    for part in parts {
-        let cmd = current.iter().find(|cmd| {
-            cmd.name.eq_ignore_ascii_case(&part)
+    let mut matched = None;
+    for part in input.strip_prefix('/')?.split_whitespace() {
+        let Some(cmd) = current.iter().find(|cmd| {
+            cmd.name.eq_ignore_ascii_case(part)
                 || cmd
                     .alt_names
                     .iter()
-                    .any(|alias| alias.eq_ignore_ascii_case(&part))
-        })?;
+                    .any(|alias| alias.eq_ignore_ascii_case(part))
+        }) else {
+            break;
+        };
         path.push(cmd.name);
+        matched = Some(cmd);
         if cmd.sub_commands.is_empty() {
-            let path = path.join(" ");
-            let arguments = match path.as_str() {
-                "resume" | "chat resume" => Some("[session]"),
-                "chat save" => Some("[name]"),
-                "chat delete" => Some("<session>"),
-                "chat share" => Some("[name]"),
-                "loop add" => Some("<name> <minutes> <prompt...>"),
-                "loop remove" | "loop pause" | "loop resume" => Some("<name>"),
-                _ => None,
-            };
-            let detail = if path == "resume" || path == "chat resume" {
-                crate::core::i18n::t1("ui.command.resume_hint")
-            } else {
-                cmd.description.to_string()
-            };
-            let usage = match arguments {
-                Some(arguments) => format!("/{path} {arguments}"),
-                None => format!("/{path}"),
-            };
-            return Some(
-                crate::core::i18n::t1("ui.command.argument_hint")
-                    .replace("{usage}", &usage)
-                    .replace("{detail}", &detail)
-                    .replace("{command}", &path),
-            );
+            break;
         }
         current = cmd.sub_commands;
     }
-    None
+    let cmd = matched?;
+    let path = path.join(" ");
+    let arguments = match path.as_str() {
+        "resume" | "chat resume" => Some("[session]".to_string()),
+        "chat save" | "chat share" => Some("[name]".to_string()),
+        "chat delete" => Some("<session>".to_string()),
+        "loop add" => Some("<name> <minutes> <prompt...>".to_string()),
+        "loop remove" | "loop pause" | "loop resume" => Some("<name>".to_string()),
+        "models" => Some("[list|use|<name>|help]".to_string()),
+        _ if !cmd.sub_commands.is_empty() => Some(format!(
+            "[{}]",
+            cmd.sub_commands
+                .iter()
+                .map(|child| child.name)
+                .collect::<Vec<_>>()
+                .join("|")
+        )),
+        _ => None,
+    };
+    let detail = if path == "resume" || path == "chat resume" {
+        crate::core::i18n::t1("ui.command.resume_hint")
+    } else {
+        cmd.description.to_string()
+    };
+    let usage = match arguments {
+        Some(arguments) => format!("/{path} {arguments}"),
+        None => format!("/{path}"),
+    };
+    Some(
+        crate::core::i18n::t1("ui.command.argument_hint")
+            .replace("{usage}", &usage)
+            .replace("{detail}", &detail)
+            .replace("{command}", &path),
+    )
 }
 
 /// 插件候选只保留展示元数据，不携带可执行载荷。
@@ -2918,6 +2948,24 @@ fn usable_plugin_candidates(plugins: &[PluginCommandCandidate]) -> Vec<&PluginCo
                 && can_dispatch_plugin_command(&plugin.name)
         })
         .collect()
+}
+
+/// 插件命令名完整后也只显示说明，沿用内置命令的弱提示文案。
+pub(crate) fn command_argument_hint_with_plugins(
+    input: &str,
+    plugins: &[PluginCommandCandidate],
+) -> Option<String> {
+    command_argument_hint(input).or_else(|| {
+        let name = input.strip_prefix('/')?.split_whitespace().next()?;
+        let usable = usable_plugin_candidates(plugins);
+        let plugin = usable.iter().find(|plugin| plugin.name == name)?;
+        Some(
+            crate::core::i18n::t1("ui.command.argument_hint")
+                .replace("{usage}", &format!("/{name}"))
+                .replace("{detail}", &plugin.description.replace(['\r', '\n'], " "))
+                .replace("{command}", name),
+        )
+    })
 }
 
 pub(crate) fn get_command_hints_with_plugins(
